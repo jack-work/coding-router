@@ -8,7 +8,9 @@ Usage:
 """
 from __future__ import annotations
 
+import collections
 import getpass
+import hashlib
 import json
 import os
 import pathlib
@@ -398,8 +400,133 @@ def message_preview(m: ChatMessage) -> str:
     return f"[{m.role}] {json.dumps(payload)[:2000]}"
 
 
+# ---------------------------------------------------------------- trajectory budget
+# The routing embedding's input budget. text-embedding-3-large accepts 8,191 TOKENS;
+# these are char budgets (~4 chars/token) with headroom, and embed_text() halves and
+# retries on a token-limit rejection, so the heuristic can never hard-fail a request.
+#
+# Layout once a conversation outgrows the budget:
+#   anchor  -- the first user message, verbatim. The kNN reference set is task-
+#              description-shaped (repo-issue statements, p50 ~2,000 chars), so this
+#              is what carries in-distribution similarity; lose it and off_distribution
+#              abstention routes every long session to the expensive fallback arm.
+#   middle  -- older messages, replaced by cached small-model summaries.
+#   recent  -- the newest messages, verbatim: the per-turn "struggling vs cruising"
+#              signal that per-turn routing exists to detect.
+EMBED_BUDGET = 24_000
+ANCHOR_BUDGET = 6_000
+MIDDLE_BUDGET = 8_000
+RECENT_MSGS = 8       # newest messages kept verbatim
+CHUNK_MSGS = 6        # ~3 tool round-trips per summarized chunk
+SUMMARY_MODEL = "gpt-5.4-nano"
+SUMMARY_CACHE_CAP = 512
+
+# Chat Completions is stateless (no session id), but conversations are append-only, so
+# summaries are keyed by a hash of the segment's own content: the same segment hashes
+# the same on every later turn, across concurrent sessions, and after client restarts.
+# Each segment is therefore summarized exactly once per process. In-memory LRU only --
+# losing it on restart just re-summarizes each segment once.
+_summary_cache: collections.OrderedDict[str, str] = collections.OrderedDict()
+
+
+def summarize_segment(text: str, client: openai.OpenAI, model: str) -> str:
+    """Summarize one trajectory segment for the routing embedding, cached by content hash.
+
+    Failures are cached too (as a head-slice of the segment), so a broken or slow
+    summarizer is paid at most once per segment and can never block dispatch.
+
+    Args:
+        text: The rendered message previews making up this segment.
+        client: OpenAI client used for the summarization call.
+        model: Model to summarize with (cheap and fast matters more than eloquence).
+
+    Returns:
+        A dense summary of the segment, or a head-slice fallback on failure.
+    """
+    key = hashlib.sha256(text.encode()).hexdigest()[:16]
+    if key in _summary_cache:
+        _summary_cache.move_to_end(key)
+        return _summary_cache[key]
+    try:
+        # Generous cap on purpose: reasoning tokens count against it, and an unused
+        # cap is free (see AgentRunner.MIN_MAX_TOKENS for the measured version of
+        # this lesson).
+        r = client.responses.create(
+            model=model, reasoning={"effort": "low"}, max_output_tokens=4_000,
+            input="Summarize this segment of a coding-agent conversation in under 120 "
+                  "words. Keep only what matters for judging task difficulty and "
+                  "progress: what was attempted, key files/commands/errors, and current "
+                  "blockers. No preamble.\n\n" + text)
+        out = (r.output_text or "").strip() or text[:600]
+        print(f"trajectory: summarized segment {key} ({len(text)} -> {len(out)} chars)")
+    except Exception as e:  # noqa: BLE001 -- routing must degrade, never block dispatch
+        out = text[:600]
+        print(f"trajectory: summarizer failed on {key} ({type(e).__name__}); using head slice")
+    _summary_cache[key] = out
+    if len(_summary_cache) > SUMMARY_CACHE_CAP:
+        _summary_cache.popitem(last=False)
+    return out
+
+
+def build_trajectory(messages: list[ChatMessage], client: openai.OpenAI,
+                     summary_model: str, summarize_middle: bool = True) -> str:
+    """Render the conversation as the routing-embedding input, within EMBED_BUDGET.
+
+    Conversations that fit are rendered whole -- the fast path, no model calls,
+    byte-identical to pre-budget behavior. Past the budget: anchor + summarized
+    middle + verbatim recent (see the budget comment above for why each part
+    exists). The middle is chunked on a fixed index grid so a completed chunk's
+    content -- and its summary cache key -- never changes as the conversation
+    grows; only complete chunks are summarized, so no per-turn re-summarization
+    of a still-moving partial chunk ever happens. If the summaries themselves
+    overflow MIDDLE_BUDGET they are compacted once more (summary-of-summaries,
+    also cached); a final hard slice is the invariant of last resort.
+
+    Args:
+        messages: The full incoming conversation.
+        client: OpenAI client used for summarization calls.
+        summary_model: Model to summarize middle chunks with.
+        summarize_middle: If False, skip summaries entirely and fall back to
+            anchor + recent -- the zero-LLM-call baseline (`--nosummarize`).
+
+    Returns:
+        The trajectory text to embed, at most EMBED_BUDGET chars.
+    """
+    previews = [message_preview(m) for m in messages]
+    full = "\n".join(previews)
+    if len(full) <= EMBED_BUDGET:
+        return full
+
+    anchor_i = next((i for i, m in enumerate(messages) if m.role == "user"), 0)
+    anchor = previews[anchor_i][:ANCHOR_BUDGET]
+
+    recent_start = max(anchor_i + 1, len(previews) - RECENT_MSGS)
+    mid_previews = previews[anchor_i + 1:recent_start]
+    n_complete = (len(mid_previews) // CHUNK_MSGS) * CHUNK_MSGS
+    chunks = [mid_previews[i:i + CHUNK_MSGS] for i in range(0, n_complete, CHUNK_MSGS)]
+    # The partial chunk next to the recent window is still growing -- summarizing it
+    # would mean a fresh (uncacheable) summary call on every turn, so it stays verbatim.
+    leftover = mid_previews[n_complete:]
+
+    mid = ""
+    if summarize_middle and chunks:
+        summaries = [summarize_segment("\n".join(c), client, summary_model) for c in chunks]
+        mid = "\n".join(f"[earlier] {s}" for s in summaries)
+        if len(mid) > MIDDLE_BUDGET:
+            mid = "[earlier] " + summarize_segment("\n".join(summaries), client, summary_model)
+        mid = mid[:MIDDLE_BUDGET]
+
+    recent = leftover + previews[recent_start:]
+    parts = [anchor] + ([mid] if mid else []) + recent
+    while len("\n".join(parts)) > EMBED_BUDGET and len(recent) > 1:
+        recent.pop(0)  # trim the oldest of the verbatim recent messages first
+        parts = [anchor] + ([mid] if mid else []) + recent
+    return "\n".join(parts)[:EMBED_BUDGET]
+
+
 def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic,
-            openrouter_client: openai.OpenAI | None = None) -> FastAPI:
+            openrouter_client: openai.OpenAI | None = None,
+            summary_model: str = SUMMARY_MODEL, summarize_middle: bool = True) -> FastAPI:
     """Build the FastAPI app exposing /v1/chat/completions and /v1/models.
 
     Args:
@@ -412,6 +539,9 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
             of calling OpenAI/Anthropic directly. Embeddings still use `openai_client`
             regardless, since routing decisions are only valid in the embedding space
             the shipped artifact was built with.
+        summary_model: Model used to summarize older trajectory chunks.
+        summarize_middle: If False, long conversations embed anchor + recent only
+            (no summarization calls at all).
 
     Returns:
         A FastAPI application ready to serve.
@@ -419,9 +549,19 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
     app = FastAPI()
 
     def embed_text(text: str) -> np.ndarray:
-        """Embed `text` with the router's configured embedding model."""
-        e = openai_client.embeddings.create(model=router.meta["embed_model"],
-                                            input=text[:8000]).data[0].embedding
+        """Embed `text` with the router's embedding model, halving once on overflow.
+
+        The char budgets in build_trajectory are a heuristic against the model's
+        8,191-TOKEN limit; pathological tokenization (dense code/unicode) can still
+        overflow, so a token-limit rejection retries once at half length rather
+        than failing the request.
+        """
+        try:
+            e = openai_client.embeddings.create(model=router.meta["embed_model"],
+                                                input=text).data[0].embedding
+        except openai.BadRequestError:
+            e = openai_client.embeddings.create(model=router.meta["embed_model"],
+                                                input=text[:len(text) // 2]).data[0].embedding
         return np.array(e, dtype=float)
 
     @app.post("/v1/chat/completions")
@@ -445,7 +585,7 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
         messages = [ChatMessage.model_validate(m) for m in body["messages"]]
         stream = bool(body.get("stream"))
 
-        trajectory = "\n".join(message_preview(m) for m in messages)
+        trajectory = build_trajectory(messages, openai_client, summary_model, summarize_middle)
         decision = router.route_embedding(embed_text(trajectory))
         tools = [parse_chat_tool(t) for t in (body.get("tools") or [])] or None
         message = (dispatch_via_openrouter(decision, messages, tools, openrouter_client)
@@ -456,7 +596,7 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
         created = int(time.time())
         print(f"routed -> {decision.model}@{decision.effort or 'default'}  "
               f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
-              f"({len(messages)} messages in)")
+              f"({len(messages)} messages in, traj={len(trajectory)}ch)")
         finish_reason = "tool_calls" if message.tool_calls else "stop"
 
         if not stream:
@@ -505,7 +645,8 @@ def print_opencode_config(port: int) -> None:
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
-def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct") -> None:
+def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct",
+         summarize: bool = True, summary_model: str = SUMMARY_MODEL) -> None:
     """Start the router-proxy server.
 
     Args:
@@ -515,6 +656,10 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
             "openrouter" dispatches everything through one OpenRouter key instead.
             Embeddings always use a direct OpenAI key either way -- the shipped
             artifact's routing decisions are only valid in that embedding space.
+        summarize: Summarize older messages (cached, one cheap call per ~6 messages)
+            when a conversation outgrows the embedding budget. `--nosummarize` falls
+            back to embedding just the task anchor + most recent messages.
+        summary_model: Model used for those summaries.
     """
     openai_key = ensure_key("OPENAI_API_KEY", "https://platform.openai.com/api-keys",
                             lambda k: openai.OpenAI(api_key=k).models.list())
@@ -534,8 +679,10 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
         anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
 
     router = Router(artifact_dir or str(ROOT / "results"))
-    app = make_app(router, openai_client, anthropic_client, openrouter_client)
-    print(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}")
+    app = make_app(router, openai_client, anthropic_client, openrouter_client,
+                   summary_model=summary_model, summarize_middle=summarize)
+    print(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}, "
+          f"summarize={summarize}")
 
     print(f"\nrouter serving at http://127.0.0.1:{port}/v1")
     print_opencode_config(port)
