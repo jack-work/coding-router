@@ -97,7 +97,7 @@ does not survive the trained decision rule. Per-seed ratios 2.28-5.93.
 
 ---
 
-## EXP-005 — low-rank factor head vs tabular memory (RUNNING, 2026-07-31)
+## EXP-005 — low-rank factor head vs tabular memory (2026-07-31)
 
 **Motivation.** Research synthesis recommends a rank-r arm-embedding head (EmbedLLM/
 IRT-style) over independent heads: 4,510 graded cells support a factor model better
@@ -108,6 +108,32 @@ objective/protocol.
 **Setup.** `train_factor.py`, GPU1 tmux rlv3gpu1. logit[a](x) = v_a.(P e_x) + b_a,
 b_a init at train base-rate log-odds. (rank, beta) in {(4, 0.1), (16, 0.1), (4, 0)},
 6 seeds each, lam swept in decision rule.
+
+**Result.** NEW CHAMPION: r4 beta=0 -> 4.25x, graded 0.931 (delta -0.003,
+CI [-0.031, +0.027]) — parity at a better ratio than every prior policy, dominating
+the EXP-001 kNN incumbent (4.02x, -0.027) on quality. Routes to only 3 arms
+(terra_high 50.4%, opus_5_low 30.7%, luna_xhigh 19.0%); never uses the $5.53 baseline
+arm. The KL-to-base-rate anchor HURT here: r4/r16 beta=0.1 give ~5.3x but delta CIs
+[-0.051,+0.001]/[-0.045,+0.001] — real quality cost. Weight decay + base-rate bias
+init are regularization enough for a head this small.
+
+**Verdict.** Partially overturns EXP-001's "kNN beats learned heads": what changed is
+the reward objective + rank-4 cross-arm sharing + base-rate init, not the head class.
+Champion promoted pending EXP-007 fresh-seed confirmation (multiple-comparisons guard:
+many variants have now been selected against the same 6 seeds).
+
+---
+
+## EXP-007 — champion confirmation on fresh seeds 6-11 (RUNNING, 2026-07-31)
+
+**Motivation.** Integrity: the 4.25x champion was one of many variants compared on the
+same 6 holdout seeds; its edge could be selection luck. Fresh, never-touched repo
+splits (seeds 6-11) give an unbiased estimate of the promoted config exactly as-is
+(factor r4, beta=0, same lam/checkpoint selection protocol).
+
+**Setup.** `train_factor.py 6,7,8,9,10,11 4 0`, CPU on box 6 (GPUs busy), tmux
+rlconfirm. Pre-registered acceptance: pooled fresh-seed delta CI must contain 0 and
+ratio must stay >= 3.5x; anything less demotes the champion to "seed-overfit".
 
 ## EXP-006 — 8B anchored LoRA (QUEUED after EXP-005, 2026-07-31)
 
