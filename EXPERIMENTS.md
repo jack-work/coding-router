@@ -203,7 +203,7 @@ estimator (does gradient noise regularize?), NCA metric learning (representation
 control: no reward signal, positives = tasks with correlated arm-outcome profiles).
 `rl/train_softknn_v4.py`, 4 algos x 6 seeds, launches when EXP-003 vacates GPU0.
 
-## EXP-010 — per-turn router variants vs current bests (READY, awaits EXP-008)
+## EXP-010 — per-turn router variants vs current bests (2026-07-31)
 
 **Comparison set, all LIVE on held-out contests (greedy):** trained per-turn linear
 policy, turn0-frozen control (per-task routing with the same policy), hand ladder
@@ -211,6 +211,43 @@ cascade (cheap->escalate on failing public tests), static nano@high, static
 opus@medium. Plus a `--sticky` retrain (prev-arm feature). Success metric: per-turn
 beats turn0-frozen at matched-or-better graded — that is the direct per-task-vs-
 per-turn granularity answer on live episodes.
+
+**Result (21 held-out live tasks, paired bootstrap vs always-opus@medium):**
+
+| variant | graded | $/task | paired dg (CI) | x cheaper |
+|---|---|---|---|---|
+| sticky-it4 turn0-frozen | 0.949 | 0.0051 | -0.046 [-0.137, +0.000] | 18.2x |
+| sticky-it4 per-turn | 0.949 | 0.0080 | -0.046 [-0.137, +0.000] | 11.6x |
+| sticky-it3 turn0-frozen | 0.939 | 0.0045 | -0.056 [-0.151, +0.000] | 20.7x |
+| ladder (hand cascade) | 0.901 | 0.0457 | -0.094 [-0.232, +0.000] | 2.0x |
+| non-sticky it3/it4 per-turn | 0.856-0.889 | 0.028-0.047 | -0.10..-0.14 | 2.0-3.3x |
+| static nano@high | 0.808 | 0.0481 | -0.187 [-0.370, -0.044] | 1.9x |
+| static opus@medium (ref) | 0.995 | 0.0928 | 0 | 1.0x |
+
+**Findings.**
+1. Trained policies reach the cheap corner: ~0.94-0.95 graded at $0.005-0.008/task —
+   11-20x cheaper than always-opus at a small (CI-touching-zero) quality cost. They
+   dominate the hand ladder and both static arms.
+2. PER-TURN SHOWS NO ADVANTAGE OVER TURN0-FROZEN here: same policy frozen at turn 0
+   is equal quality and CHEAPER (per-turn pays switch re-prefill, visible as
+   +60% cost for sticky-it4 per-turn vs its turn0 twin). Consistent with the
+   saturation caveat: short, easy LCB episodes offer no mid-episode escalation
+   opportunities; the granularity question needs the DeepSWE regime to be decisive.
+3. The sticky (prev-arm) feature was the difference between the cheap corner and
+   mediocrity — non-sticky policies landed at 2-3x. Arm-commitment coherence matters.
+4. Live-vs-matrix scaffold gap: static nano@high costs $0.048/task live vs $0.0034
+   matrix median — the stateless per-turn scaffold re-prefills every turn and hurts
+   reasoning-heavy arms most. Matrix priors and live costs are not interchangeable.
+5. Ops lessons: concurrent evals raced the episode cache (ladder resamples differ
+   0.901/$0.046 vs 0.949/$0.032 — that spread IS the live-eval noise floor at n=21);
+   mid-wave reads are biased (it3 looked 0.998 at 16/21, fell to 0.856 at 21/21 —
+   stragglers are hard tasks); checkpoint selection by train reward is mandatory
+   (it4 was one noisy update past it3 and markedly worse).
+
+**Verdict.** On-policy per-turn training WORKS mechanically end-to-end (cross-provider
+mid-episode switching, $25 total spend), and trained routing crushes statics/ladder on
+LCB — but per-task (turn0) granularity is not beaten on this benchmark. Next per-turn
+test needs either injected mid-episode difficulty on LCB or a live long-horizon domain.
 
 ## EXP-006 — 8B anchored LoRA (QUEUED after EXP-005, 2026-07-31)
 

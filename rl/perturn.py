@@ -198,7 +198,7 @@ class Turn0Policy:
 
     def logits(self, x: np.ndarray) -> np.ndarray:
         if self.choice is None:
-            self.choice = int(np.argmax(self.inner.logits(x[:DIM])))
+            self.choice = int(np.argmax(self.inner.logits(x[: self.inner.W.shape[1]])))
         z = np.full(len(ARMS), -1e3)
         z[self.choice] = 1e3
         return z
@@ -417,13 +417,18 @@ def cmd_eval(policy_path: str, workers: int = 10) -> None:
         "static-nano@high": lambda: StaticPolicy(ARM_IDS.index("gpt-5.4-nano@high")),
         "static-opus@medium": lambda: StaticPolicy(ARM_IDS.index("claude-opus-4-8@medium")),
     }
+    stem = pathlib.Path(policy_path).stem
     rows = {}
     for name, mk in factories.items():
+        # ladder/static are policy-independent (cache across evals); the rest are not
+        tag = f"eval-{name}" if name.startswith(("ladder", "static")) \
+            else f"eval-{name}-{stem}"
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(run_episode, p,
-                              dataclasses.replace(feats[p.qid],
-                                                  sticky=sticky and name == "perturn"),
-                              mk(), np.random.default_rng(0), True, f"eval-{name}")
+                              dataclasses.replace(
+                                  feats[p.qid],
+                                  sticky=sticky and name in ("perturn", "turn0-frozen")),
+                              mk(), np.random.default_rng(0), True, tag)
                     for p in evalp]
             recs = [f.result() for f in cf.as_completed(futs)]
         rows[name] = recs
