@@ -9,8 +9,22 @@ All experiments share the evaluation protocol fixed by EXP-001 unless stated:
 DeepSWE v1.1, 41-arm frontier pool x 110 tasks, 6 seeds of 80/20 repo-split holdouts,
 hyperparameters + checkpoints selected ONLY on an inner 75/25 repo split of the train
 side (feasibility: inner graded >= inner-best-arm - 0.02, then max cost ratio), pooled
-holdout decisions, repo-clustered bootstrap CIs. Baseline = always-best train arm
-(claude_opus_5_high on every seed): $5.53/task, graded 0.934 on the pooled cells.
+holdout decisions, repo-clustered bootstrap CIs. Baseline = always-best train arm:
+$5.53/task, graded 0.934 on the pooled cells.
+
+**CORRECTION (2026-07-31, luna_max audit).** Two claims previously in this file were
+wrong. (1) The always-best-train arm is NOT "opus_5_high on every seed" — opus is the
+train argmax on only 3 of 6 seeds; the policy suffers winner's curse (e.g. seed 0
+picks gpt_5_5_high at train 0.962, which collapses to 0.880 on test). (2) The
+statement "static luna_max beat always-opus on pooled holdout cells (0.944 vs 0.934)"
+misattributed the 0.934: that number is the always-best-TRAIN-ARM POLICY, not static
+opus. Static opus on the identical pooled cells scores 0.963 and beats luna_max
+(0.9445) on 5 of 6 seeds. Corrected claims: luna_max beats the IMPLEMENTABLE
+always-best-train policy (fresh seeds 6-17: +0.0125 graded at 2.03x cheaper), and is
+at statistical parity with each single frontier arm (all repo-clustered CIs span 0);
+static opus remains the strongest static quality reference. All router deltas in this
+file are vs the always-best-train POLICY — a winner's-curse-weakened baseline; the
+EXP-012 table reports static-arm baselines alongside.
 
 ---
 
