@@ -80,6 +80,11 @@ geometry policy so the encoder can only move where reward justifies it.
 pi_ref = init-geometry policy (LoRA B=0 at step 0), beta in {0.05, 0.2}, 6 seeds each.
 Success = holdout quality decay eliminated AND a point dominating either EXP-002 mode.
 
+**Result (beta=0.05, 6 seeds).** 5.84x, graded 0.882 (delta -0.052, CI
+[-0.087, -0.021]) — statistically indistinguishable from UNANCHORED LoRA
+(5.72x/-0.049): the weak anchor changed nothing. All seeds again selected lam=0.1.
+beta=0.2 batch: seeds 3-5 still running (GPU0 now shared with EXP-009).
+
 ## EXP-004 — 8B encoder under the trained decision rule (2026-07-31)
 
 **Motivation.** EXP-001 showed 8B embeddings buy quality (kNN -0.007). Does the
