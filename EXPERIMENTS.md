@@ -135,6 +135,46 @@ splits (seeds 6-11) give an unbiased estimate of the promoted config exactly as-
 rlconfirm. Pre-registered acceptance: pooled fresh-seed delta CI must contain 0 and
 ratio must stay >= 3.5x; anything less demotes the champion to "seed-overfit".
 
+**Result.** PASS: 5.33x (CI [4.86, 5.79]), delta -0.027 (CI [-0.059, +0.005]),
+per-seed ratios 3.52-8.80. Honest read: ratio is robust (4.2-5.3x across seed
+batches); quality delta's central value moved from -0.003 to -0.027 — parity holds
+by the pre-registered test, but a small real quality cost (~0.02-0.03) is likely.
+The original 6-seed -0.003 was probably the optimistic tail of selection.
+
+**Verdict.** Champion CONFIRMED as the per-task offline configuration: factor r4,
+beta=0, reward objective, frozen 0.6B embeddings — ~4.3-5.3x at <=0.03 quality cost.
+
+---
+
+## PIVOT (Kion, 2026-07-31): PER-TURN routing is the primary objective
+
+Route every agent turn (each LLM call), switching arms mid-trajectory. All experiments
+above are per-task (one arm per whole episode) and become baselines. Per-turn
+counterfactuals do not exist in any offline matrix we hold, so this requires ON-POLICY
+LIVE rollouts with the models in the loop (Kion endorsed). Live environment:
+LiveCodeBench agentic episodes in E2B (repo harness), where episodes are minutes and
+cents, vs DeepSWE's 15-min/$1+ episodes.
+
+## EXP-008 — on-policy per-turn routing on LiveCodeBench (BUILDING, 2026-07-31)
+
+**Motivation.** First per-turn result + first models-in-the-loop RL. Does a per-turn
+policy (state = task difficulty priors + live episode signals) beat (a) the best
+static arm and (b) the same policy frozen to its turn-0 decision (per-task routing),
+on held-out contests at matched cost?
+
+**Design.**
+- Episode runner: stateless per-turn calls — canonical TEXT history (tool calls and
+  outputs flattened to text, mini-swe-agent-style), native tool EMISSION per call, so
+  any turn can switch arm/provider without provider-native history round-tripping.
+- Arms: the 7 LCB-matrix arms (all cheap: med $0.0016-$0.03/episode).
+- State per turn: kNN per-arm p_solve priors from the TRAIN-contest matrix only,
+  turn fraction, log cost-so-far, public-test pass fraction, wrote-solution flag,
+  last-exit-ok.
+- Policy: linear softmax head; sampled during training (REINFORCE, task-mean baseline
+  from M=2 rollouts, GRPO-style), argmax at eval. Reward = graded - lam*cost, lam=8.
+- Split by CONTEST (train contests for rollouts, held-out contests for eval).
+- Budget cap: abort if cumulative episode spend exceeds $40.
+
 ## EXP-006 — 8B anchored LoRA (QUEUED after EXP-005, 2026-07-31)
 
 **Setup.** `train_softknn_v2_150.py` (150 steps), lora mode, 8b, beta=0.2, 6 seeds,
