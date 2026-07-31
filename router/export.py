@@ -11,7 +11,6 @@ that was measured.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import pathlib
 import re
@@ -39,6 +38,14 @@ EXPORT_EFFORTS = ("low", "medium", "high", "xhigh", "max", "default")
 # but the mapping is explicit so a future arm cannot silently emit an invalid request.
 NO_EFFORT = {"claude-haiku-4-5"}
 
+# The `local` variant re-embeds the 110 reference tasks with a small model that runs
+# entirely on-device (via MLX; see ../router-eval), so routing decisions need no cloud
+# API call at all. Requires a local OpenAI-compatible embeddings server already running
+# at LOCAL_EMBED_BASE_URL for any cache-miss task -- none are expected, since
+# results/deepswe_embeddings_local.json already covers all 113 DeepSWE tasks.
+LOCAL_EMBED_MODEL = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+LOCAL_EMBED_BASE_URL = "http://127.0.0.1:8081/v1"
+
 
 def arm_to_spec(arm: str) -> dict:
     """`mini_swe_agent_gpt_5_6_sol_medium` -> real provider model id + request kwargs."""
@@ -64,13 +71,19 @@ def arm_to_spec(arm: str) -> dict:
             "provider": "anthropic" if anthropic else "openai", "request_kwargs": kw}
 
 
-def cmd_export_router(args) -> None:
+def cmd_export_router(local: bool = False) -> None:
+    """`local=True` re-embeds with LOCAL_EMBED_MODEL instead of OpenAI, writing
+    router_v0_local.{json,npz} alongside (not over) the cloud-embedded router_v0.*."""
     load_env()
     OUT = ROOT / "results"
 
     full = experiments.build()
-    d = experiments.datasets_b.load_deepswe()
-    experiments.embed(full, d["text"])
+    d = experiments.datasets.load_deepswe()
+    if local:
+        experiments.embed(full, d["text"], cache_path=OUT / "deepswe_embeddings_local.json",
+                          embed_model=LOCAL_EMBED_MODEL, base_url=LOCAL_EMBED_BASE_URL)
+    else:
+        experiments.embed(full, d["text"])
     keep = [i for i, a in enumerate(full.arms)
             if any(t in a for t in ("gpt_5", "claude_", "codex"))]
     arms = [full.arms[i] for i in keep]
@@ -82,7 +95,8 @@ def cmd_export_router(args) -> None:
     fallback = int(np.argmax(graded.mean(axis=1)))
     meta = {
         "version": "v0",
-        "embed_model": experiments.__dict__.get("EMBED", None) or "text-embedding-3-large",
+        "embed_model": LOCAL_EMBED_MODEL if local else "text-embedding-3-large",
+        "embed_base_url": LOCAL_EMBED_BASE_URL if local else None,
         "arms": arms,
         "arm_spec": {a: arm_to_spec(a) for a in arms},
         "k": EXPORT_K, "tau": EXPORT_TAU, "sim_floor": SIM_FLOOR,
@@ -92,7 +106,15 @@ def cmd_export_router(args) -> None:
             f"{len(set(full.group))} repos. Labels are DeepSWE's published per-trial "
             f"f2p_passed/f2p_total and cost_usd; we ran no episodes. Nested repo-grouped CV "
             f"measured 2.15x cheaper than always-{arms[fallback]} at graded 0.933 vs 0.954, "
-            f"cost-ratio 95% CI [1.87,2.46], graded-delta 95% CI [-0.044,+0.000]."),
+            f"cost-ratio 95% CI [1.87,2.46], graded-delta 95% CI [-0.044,+0.000]."
+            if not local else
+            f"Same DeepSWE v1.1 supervision as the cloud-embedded router_v0.json ("
+            f"{len(arms)} arms x {full.n} tasks over {len(set(full.group))} repos), but "
+            f"embedded locally with {LOCAL_EMBED_MODEL} instead of OpenAI. A separate "
+            f"80/20 repo-split holdout (not the 5-fold CV below) found LOCAL embeddings "
+            f"gave cost ratio median 3.79x vs OpenAI's 3.18x, graded-delta median -0.021 "
+            f"vs -0.015, across 6 seeds -- comparable, not yet validated at the same "
+            f"rigor as the cloud variant's nested-CV headline number."),
         "scope_warning": (
             "INPUT SHAPE MATTERS. Fit on repo-issue statements of p10=955 / p50=1976 / "
             "p90=3450 characters. In-distribution nearest-neighbour cosine similarity runs "
@@ -106,15 +128,21 @@ def cmd_export_router(args) -> None:
             "The shipped artifact, re-run under the same repo-grouped folds WITH the "
             "sim_floor guard active, gives 1.81x cheaper at graded 0.939 (18/110 tasks "
             "escalated as off-distribution). The 2.15x figure is the ungated policy. The "
-            "guard trades 0.34x of saving for +0.006 graded and a refusal-to-guess property."),
+            "guard trades 0.34x of saving for +0.006 graded and a refusal-to-guess property."
+            if not local else
+            "Self-test numbers below (this artifact, re-run under the same repo-grouped "
+            "folds) are the only measured claim for this variant -- no separate ungated-vs-"
+            "guarded comparison has been run yet, unlike the cloud variant."),
         "n_tasks": int(full.n), "n_repos": int(len(set(full.group))),
     }
     OUT.mkdir(exist_ok=True)
-    (OUT / "router_v0.json").write_text(json.dumps(meta, indent=1))
-    np.savez_compressed(OUT / "router_v0.npz", emb=full.emb.astype(np.float32),
+    json_name, npz_name = ("router_v0_local.json", "router_v0_local.npz") if local \
+        else ("router_v0.json", "router_v0.npz")
+    (OUT / json_name).write_text(json.dumps(meta, indent=1))
+    np.savez_compressed(OUT / npz_name, emb=full.emb.astype(np.float32),
                         resolved=resolved, med_cost=med)
-    sz = sum((OUT / f).stat().st_size for f in ("router_v0.json", "router_v0.npz"))
-    print(f"wrote results/router_v0.{{json,npz}}  ({sz/1024:.0f} KB total)")
+    sz = sum((OUT / f).stat().st_size for f in (json_name, npz_name))
+    print(f"wrote results/{json_name.replace('.json','')}.{{json,npz}}  ({sz/1024:.0f} KB total)")
 
     # ---- self-test: does the ARTIFACT reproduce the measured experiment? ----
     m = route.Matrix(arms=arms, qids=full.qids, resolved=resolved, graded=graded,
@@ -127,7 +155,7 @@ def cmd_export_router(args) -> None:
         tr = np.array([j for j in range(m.n) if j not in set(te.tolist())])
         # Restrict the artifact's table to this fold's train rows, so the self-test is
         # honest rather than letting the shipped table see the test task.
-        sub = Router(OUT)
+        sub = Router(OUT, artifact_json=json_name, artifact_npz=npz_name)
         sub.emb, sub.resolved = m.emb[tr], resolved[:, tr]
         sub.med_cost = np.median(cost[:, tr], axis=1)
         sub._order = np.argsort(sub.med_cost)
@@ -150,12 +178,11 @@ def cmd_export_router(args) -> None:
     print("  OK -- artifact behaves like the measured experiment")
 
 
-def main() -> None:
-    cmd_export_router(argparse.Namespace())
+def main(local: bool = False) -> None:
+    cmd_export_router(local)
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.parse_args()
-    main()
+    import fire
+
+    fire.Fire(main)

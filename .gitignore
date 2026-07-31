@@ -11,3 +11,4 @@ __pycache__/
 .DS_Store
 .ruff_cache/
 .ty_cache/
+*.egg-info/

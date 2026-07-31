@@ -9,7 +9,6 @@ Subcommands:
 """
 from __future__ import annotations
 
-import argparse
 import concurrent.futures as cf
 import json
 import pathlib
@@ -20,9 +19,10 @@ import time
 import anthropic
 import numpy as np
 import openai
+from tabulate import tabulate
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from router import datasets_b  # noqa: E402
+from router import datasets  # noqa: E402
 from router import harness as sandbox  # noqa: E402
 from router import router_core as route  # noqa: E402
 from router.harness import load_env  # noqa: E402
@@ -46,7 +46,7 @@ DEEPSWE_EMB = ROOT / "results" / "deepswe_embeddings.json"
 
 
 def build() -> route.Matrix:
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     g = np.array(d["score"], dtype=float)
     c = np.array(d["cost"], dtype=float)
     # 2 score cells and 7 cost cells are missing. Silently propagating them made argmin
@@ -68,18 +68,20 @@ def build() -> route.Matrix:
         group=[d["group"].get(q, q) for q in tasks])
 
 
-def embed(m: route.Matrix, text: dict[str, str]) -> None:
-    cache = json.loads(DEEPSWE_EMB.read_text()) if DEEPSWE_EMB.exists() else {}
+def embed(m: route.Matrix, text: dict[str, str], *, cache_path: pathlib.Path | None = None,
+          embed_model: str = "text-embedding-3-large", base_url: str | None = None) -> None:
+    cache_path = cache_path or DEEPSWE_EMB
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     todo = [q for q in m.qids if q not in cache]
     if todo:
-        cl = openai.OpenAI()
+        cl = openai.OpenAI(api_key="not-needed" if base_url else None, base_url=base_url)
         for i in range(0, len(todo), 64):
             ch = todo[i:i + 64]
-            out = cl.embeddings.create(model="text-embedding-3-large",
+            out = cl.embeddings.create(model=embed_model,
                                        input=[(text.get(q) or q)[:8000] for q in ch])
             for q, e in zip(ch, out.data):
                 cache[q] = e.embedding
-        DEEPSWE_EMB.write_text(json.dumps(cache))
+        cache_path.write_text(json.dumps(cache))
     e = np.array([cache[q] for q in m.qids], dtype=float)
     m.emb = e / np.linalg.norm(e, axis=1, keepdims=True)
 
@@ -104,10 +106,10 @@ def deepswe_run(m: route.Matrix, policy, folds, pricey: int):
     return gr, co, hit
 
 
-def cmd_race_deepswe(args: argparse.Namespace) -> None:
+def cmd_race_deepswe() -> None:
     load_env()
     m = build()
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     embed(m, d["text"])
     print(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks, {len(set(m.group))} repos (CV groups)")
 
@@ -134,24 +136,24 @@ def cmd_race_deepswe(args: argparse.Namespace) -> None:
         pols.append((f"knn-two-sided t={tau}", route.p_knn_two_sided(12, tau)))
         pols.append((f"knn+cascade t={tau}", route.p_knn_cascade(12, tau)))
 
-    print(f"  {'policy':24s} {'graded':>7s} {'vs base':>8s} {'cost$':>8s} {'x cheap':>8s} "
-          f"{'95% CI':>14s} {'->pricey':>9s}")
-    rows = []
+    rows, table = [], []
     for name, p in pols:
         g, c, h = deepswe_run(m, p, folds, pricey)
         r = B / c.sum() if c.sum() else float("inf")
         lo, hi = route.boot_ratio(bc, c, m.group)
         rows.append((name, g.mean(), c.sum(), r, lo, hi, h.mean()))
-        print(f"  {name:24s} {g.mean():7.3f} {g.mean()-bg.mean():+8.3f} {c.sum():8.1f} "
-              f"{r:8.2f} [{lo:5.2f},{hi:5.2f}] {h.mean()*100:8.1f}%")
+        table.append((name, f"{g.mean():.3f}", f"{g.mean()-bg.mean():+.3f}", f"{c.sum():.1f}",
+                      f"{r:.2f}", f"[{lo:.2f},{hi:.2f}]", f"{h.mean()*100:.1f}%"))
 
     og, oc = route.oracle(m)
     # Oracle's own use of the priciest arm is the yardstick for collapse.
     o_pricey = np.mean([bool(m.resolved[pricey, j]
                              and m.cost[pricey, j] <= m.cost[np.where(m.resolved[:, j])[0], j].min())
                         for j in range(m.n)])
-    print(f"  {'ORACLE (cheapest win)':24s} {m.graded.max(axis=0).mean():7.3f} "
-          f"{'':8s} {oc.sum():8.1f} {B/oc.sum():8.2f} {'':14s} {o_pricey*100:8.1f}%")
+    table.append(("ORACLE (cheapest win)", f"{m.graded.max(axis=0).mean():.3f}", "",
+                  f"{oc.sum():.1f}", f"{B/oc.sum():.2f}", "", f"{o_pricey*100:.1f}%"))
+    print(tabulate(table, headers=["policy", "graded", "vs base", "cost$", "x cheap",
+                                    "95% CI", "->pricey"], disable_numparse=True))
 
     # Give the cascade its strongest form before claiming kNN beats it. Picking the first
     # rung as argmin(cost) chose the worst arm in the pool (graded 0.370), which is a straw
@@ -215,10 +217,10 @@ def split_by_repo_holdout(m: route.Matrix, frac: float, seed: int) -> tuple[np.n
     return tr, te
 
 
-def cmd_holdout_deepswe(args: argparse.Namespace) -> None:
+def cmd_holdout_deepswe() -> None:
     load_env()
     full = build()
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     embed(full, d["text"])
     keep = [i for i, a in enumerate(full.arms)
             if any(t in a for t in ("gpt_5", "claude_", "codex"))]
@@ -228,9 +230,7 @@ def cmd_holdout_deepswe(args: argparse.Namespace) -> None:
                      group=full.group, emb=full.emb)
     print(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks x {len(set(m.group))} repos\n")
 
-    print(f"  {'seed':>4s} {'tr/te tasks':>12s} {'tr/te repos':>12s} {'(k,tau)':>10s} "
-          f"{'base':>6s} {'knn':>6s} {'delta':>7s} {'x cheap':>8s} {'95% CI':>14s}")
-    ratios, deltas = [], []
+    ratios, deltas, table = [], [], []
     for seed in range(6):
         tr, te = split_by_repo_holdout(m, 0.8, seed)
         TR, TE = sub_holdout(m, tr), sub_holdout(m, te)
@@ -277,11 +277,13 @@ def cmd_holdout_deepswe(args: argparse.Namespace) -> None:
         lo, hi = route.boot_ratio(bc, co, TE.group)
         ratios.append(bc.sum() / co.sum())
         deltas.append(gr.mean() - bg.mean())
-        print(f"  {seed:4d} {f'{TR.n}/{TE.n}':>12s} "
-              f"{f'{len(set(TR.group))}/{len(set(TE.group))}':>12s} {f'({k},{t})':>10s} "
-              f"{bg.mean():6.3f} {gr.mean():6.3f} {gr.mean()-bg.mean():+7.3f} "
-              f"{bc.sum()/co.sum():8.2f} [{lo:5.2f},{hi:5.2f}]")
+        table.append((seed, f"{TR.n}/{TE.n}", f"{len(set(TR.group))}/{len(set(TE.group))}",
+                      f"({k},{t})", f"{bg.mean():.3f}", f"{gr.mean():.3f}",
+                      f"{gr.mean()-bg.mean():+.3f}", f"{bc.sum()/co.sum():.2f}",
+                      f"[{lo:.2f},{hi:.2f}]"))
 
+    print(tabulate(table, headers=["seed", "tr/te tasks", "tr/te repos", "(k,tau)", "base",
+                                    "knn", "delta", "x cheap", "95% CI"], disable_numparse=True))
     print(f"\n  across 6 splits: cost ratio median {np.median(ratios):.2f} "
           f"(min {min(ratios):.2f}, max {max(ratios):.2f})")
     print(f"                   graded delta median {np.median(deltas):+.3f} "
@@ -336,10 +338,10 @@ def one_task(TR, q_res, q_grd, q_cost, q_diff, q_grp, q_emb, k, tau):
     return route.p_knn_threshold(k, tau)(merged, np.arange(TR.n), TR.n)[0]
 
 
-def cmd_exp1_holdout9(args: argparse.Namespace) -> None:
+def cmd_exp1_holdout9() -> None:
     load_env()
     full = build()
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     embed(full, d["text"])
     idx = [i for i, a in enumerate(full.arms)
            if a.replace("mini_swe_agent_", "") in NINE]
@@ -354,9 +356,7 @@ def cmd_exp1_holdout9(args: argparse.Namespace) -> None:
     for i in np.argsort(tot):
         print(f"  {m.arms[i]:24s} graded {g[i]:.3f}  ${tot[i]/m.n:5.2f}/task")
 
-    rows = []
-    print(f"\n  {'seed':>4s} {'tr/te':>9s} {'repos':>8s} {'(k,tau)':>9s} {'base':>6s} "
-          f"{'knn':>6s} {'delta':>7s} {'x cheap':>8s} {'95% CI':>13s}")
+    rows, table = [], []
     for seed in EXP1_SEEDS:
         tr, te = split_by_repo_exp1(m, 0.8, seed)
         TR, TE = sub_exp1(m, tr), sub_exp1(m, te)
@@ -391,10 +391,14 @@ def cmd_exp1_holdout9(args: argparse.Namespace) -> None:
                      "delta": float(gr.mean() - bg.mean()),
                      "ratio": float(bc.sum() / co.sum()), "ci": [float(lo), float(hi)],
                      "baseline_arm": TR.arms[gb]})
-        print(f"  {seed:4d} {f'{TR.n}/{TE.n}':>9s} {f'{len(set(TR.group))}/{len(set(TE.group))}':>8s} "
-              f"{f'({k},{t})':>9s} {bg.mean():6.3f} {gr.mean():6.3f} "
-              f"{gr.mean()-bg.mean():+7.3f} {bc.sum()/co.sum():8.2f} [{lo:4.2f},{hi:4.2f}]")
+        table.append((seed, f"{TR.n}/{TE.n}", f"{len(set(TR.group))}/{len(set(TE.group))}",
+                      f"({k},{t})", f"{bg.mean():.3f}", f"{gr.mean():.3f}",
+                      f"{gr.mean()-bg.mean():+.3f}", f"{bc.sum()/co.sum():.2f}",
+                      f"[{lo:.2f},{hi:.2f}]"))
 
+    print()
+    print(tabulate(table, headers=["seed", "tr/te", "repos", "(k,tau)", "base", "knn",
+                                    "delta", "x cheap", "95% CI"], disable_numparse=True))
     R = [r["ratio"] for r in rows]
     Dl = [r["delta"] for r in rows]
     print(f"\n  HEADLINE across {len(EXP1_SEEDS)} seeds:")
@@ -415,7 +419,7 @@ matched accuracy? If not, ship the cascade.
 """
 
 
-def cmd_race_router(args: argparse.Namespace) -> None:
+def cmd_race_router() -> None:
     load_env()
     m = route.load_matrix()
     print(f"matrix: {len(m.arms)} arms x {m.n} problems, "
@@ -451,22 +455,23 @@ def cmd_race_router(args: argparse.Namespace) -> None:
     for tau in (0.7, 0.9):
         policies.append((f"knn+cascade tau={tau}", route.p_knn_cascade(12, tau)))
 
-    print(f"  {'policy':26s} {'acc':>7s} {'vs base':>8s} {'cost$':>8s} {'x cheaper':>10s} "
-          f"{'95% CI':>16s} {'McNemar':>8s}")
-    rows = []
+    rows, table = [], []
     for name, pol in policies:
         r, c = route.run_policy(m, pol, folds)
         ratio = B / c.sum() if c.sum() else float("inf")
         lo, hi = route.boot_ratio(base_cost, c, m.group)
         p = route.mcnemar(base_res, r)
         rows.append((name, r.mean(), c.sum(), ratio, lo, hi, p))
-        print(f"  {name:26s} {r.mean()*100:6.1f}% {(r.mean()-base_res.mean())*100:+7.1f} "
-              f"{c.sum():8.3f} {ratio:10.2f} [{lo:5.2f},{hi:5.2f}] {p:8.3f}")
+        table.append((name, f"{r.mean()*100:.1f}%", f"{(r.mean()-base_res.mean())*100:+.1f}",
+                      f"{c.sum():.3f}", f"{ratio:.2f}", f"[{lo:.2f},{hi:.2f}]", f"{p:.3f}"))
 
     for label, kw in (("ORACLE", {}), ("PARITY ORACLE", {"parity_to": best})):
         r, c = route.oracle(m, **kw)
-        print(f"  {label:26s} {r.mean()*100:6.1f}% {(r.mean()-base_res.mean())*100:+7.1f} "
-              f"{c.sum():8.3f} {B/c.sum():10.2f}   (ceiling)")
+        table.append((label, f"{r.mean()*100:.1f}%", f"{(r.mean()-base_res.mean())*100:+.1f}",
+                      f"{c.sum():.3f}", f"{B/c.sum():.2f}", "", "(ceiling)"))
+
+    print(tabulate(table, headers=["policy", "acc", "vs base", "cost$", "x cheaper",
+                                    "95% CI", "McNemar"], disable_numparse=True))
 
     casc = next(x for x in rows if x[0].startswith("CASCADE"))
     learned = [x for x in rows if x[0].startswith("knn")]
@@ -585,7 +590,7 @@ def probe_run(job):
     return label, res
 
 
-def cmd_probe_arms(args: argparse.Namespace) -> None:
+def cmd_probe_arms() -> None:
     load_env()
     jobs = [("anthropic", a) for a in ANTHROPIC_ARMS] + [("openai", a) for a in OPENAI_ARMS]
     out: dict[str, dict] = {}
@@ -606,15 +611,12 @@ def cmd_probe_arms(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = ap.add_subparsers(dest="command", required=True)
+    import fire
 
-    subparsers.add_parser("holdout-deepswe").set_defaults(func=cmd_holdout_deepswe)
-    subparsers.add_parser("exp1-holdout9").set_defaults(func=cmd_exp1_holdout9)
-    subparsers.add_parser("race-router").set_defaults(func=cmd_race_router)
-    subparsers.add_parser("race-deepswe").set_defaults(func=cmd_race_deepswe)
-    subparsers.add_parser("probe-arms").set_defaults(func=cmd_probe_arms)
-
-    ns = ap.parse_args()
-    ns.func(ns)
+    fire.Fire({
+        "holdout-deepswe": cmd_holdout_deepswe,
+        "exp1-holdout9": cmd_exp1_holdout9,
+        "race-router": cmd_race_router,
+        "race-deepswe": cmd_race_deepswe,
+        "probe-arms": cmd_probe_arms,
+    })

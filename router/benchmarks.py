@@ -9,7 +9,6 @@ Subcommands:
 """
 from __future__ import annotations
 
-import argparse
 import base64
 import concurrent.futures as cf
 import json
@@ -22,6 +21,7 @@ import tempfile
 import time
 
 import numpy as np
+from tabulate import tabulate
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from router import harness as sandbox  # noqa: E402
@@ -82,7 +82,7 @@ def fetch_submission(name: str) -> tuple[str, dict | None]:
     return name, {"meta": meta, "details": details}
 
 
-def cmd_fetch_swebench_matrix(args: argparse.Namespace) -> None:
+def cmd_fetch_swebench_matrix() -> None:
     dirs = [d["name"] for d in gh_json(f"repos/{SWEBENCH_REPO}/contents/{SWEBENCH_BASE}")
             if d["type"] == "dir"]
     print(f"{len(dirs)} submissions found")
@@ -175,7 +175,7 @@ def embed(m: route.Matrix) -> None:
     m.emb = e / np.linalg.norm(e, axis=1, keepdims=True)
 
 
-def cmd_transfer_swebench(args: argparse.Namespace) -> None:
+def cmd_transfer_swebench() -> None:
     load_env()
     m = build()
     embed(m)
@@ -196,20 +196,24 @@ def cmd_transfer_swebench(args: argparse.Namespace) -> None:
     folds = route.grouped_folds(m, n_folds=5, seed=0)
     br, bc = route.run_policy(m, route.p_always(best), folds)
     B = bc.sum()
-    print(f"\n  {'policy':26s} {'acc':>7s} {'delta':>7s} {'cost$':>9s} {'x cheap':>8s} {'95% CI':>14s}")
-    print(f"  {'always-best':26s} {br.mean()*100:6.1f}% {0.0:+7.1f} {B:9.1f} {1.00:8.2f}")
+    rows = [("always-best", f"{br.mean()*100:.1f}%", f"{0.0:+.1f}", f"{B:.1f}", f"{1.00:.2f}", "")]
     for tau in (0.3, 0.5, 0.7, 0.9):
         r, c = route.run_policy(m, route.p_knn_threshold(12, tau), folds)
         lo, hi = route.boot_ratio(bc, c, m.group)
-        print(f"  {f'knn-threshold t={tau:.1f}':26s} {r.mean()*100:6.1f}% "
-              f"{(r.mean()-br.mean())*100:+7.1f} {c.sum():9.1f} {B/c.sum():8.2f} [{lo:5.2f},{hi:5.2f}]")
+        rows.append((f"knn-threshold t={tau:.1f}", f"{r.mean()*100:.1f}%",
+                     f"{(r.mean()-br.mean())*100:+.1f}", f"{c.sum():.1f}",
+                     f"{B/c.sum():.2f}", f"[{lo:.2f},{hi:.2f}]"))
     rc, cc = route.run_policy(m, route.p_cascade(int(np.argmin(tot)), best), folds)
     lo, hi = route.boot_ratio(bc, cc, m.group)
-    print(f"  {'cascade cheapest->best':26s} {rc.mean()*100:6.1f}% "
-          f"{(rc.mean()-br.mean())*100:+7.1f} {cc.sum():9.1f} {B/cc.sum():8.2f} [{lo:5.2f},{hi:5.2f}]")
+    rows.append(("cascade cheapest->best", f"{rc.mean()*100:.1f}%",
+                 f"{(rc.mean()-br.mean())*100:+.1f}", f"{cc.sum():.1f}",
+                 f"{B/cc.sum():.2f}", f"[{lo:.2f},{hi:.2f}]"))
     orr, oc = route.oracle(m)
-    print(f"  {'ORACLE':26s} {orr.mean()*100:6.1f}% {(orr.mean()-br.mean())*100:+7.1f} "
-          f"{oc.sum():9.1f} {B/oc.sum():8.2f}   (ceiling)")
+    rows.append(("ORACLE", f"{orr.mean()*100:.1f}%", f"{(orr.mean()-br.mean())*100:+.1f}",
+                 f"{oc.sum():.1f}", f"{B/oc.sum():.2f}", "(ceiling)"))
+    print()
+    print(tabulate(rows, headers=["policy", "acc", "delta", "cost$", "x cheap", "95% CI"],
+                   disable_numparse=True))
 
 
 # ============================================================ run-lcb
@@ -342,23 +346,26 @@ def episode(job) -> dict:
     return rec
 
 
-def cmd_run_lcb(args: argparse.Namespace) -> None:
+def cmd_run_lcb(arms: str = "cheap", n: int = 6, workers: int = 8, max_turns: int = 60,
+                max_concurrent: int = sandbox.DEFAULT_MAX_CONCURRENT) -> None:
+    if arms not in ARM_SETS:
+        raise ValueError(f"arms must be one of {sorted(ARM_SETS)}, got {arms!r}")
     load_env()
     # Bind the sandbox cap before any worker starts, so the limit actually applies.
-    sandbox.semaphore(args.max_concurrent)
+    sandbox.semaphore(max_concurrent)
     probs = sandbox.load()
     # Stratify so the gradient is visible even on a tiny dev slice.
     picked = []
     for band in ("easy", "medium", "hard"):
-        picked += [p for p in probs if p.difficulty == band][: args.n]
-    arms = ARM_SETS[args.arms]
-    jobs = [(p, arm, args.max_turns) for p in picked for arm in arms]
-    print(f"{len(picked)} problems x {len(arms)} arms = {len(jobs)} episodes, "
-          f"{args.workers} workers")
+        picked += [p for p in probs if p.difficulty == band][:n]
+    arm_list = ARM_SETS[arms]
+    jobs = [(p, arm, max_turns) for p in picked for arm in arm_list]
+    print(f"{len(picked)} problems x {len(arm_list)} arms = {len(jobs)} episodes, "
+          f"{workers} workers")
 
     t0 = time.time()
     recs = []
-    with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
         for i, rec in enumerate(ex.map(episode, jobs), 1):
             recs.append(rec)
             flag = "cache" if rec.get("cached") else ("ERR " if rec.get("harness_error") else
@@ -372,7 +379,7 @@ def cmd_run_lcb(args: argparse.Namespace) -> None:
     fresh = [r for r in recs if not r.get("cached")]
     print(f"\n=== {len(jobs)} episodes in {wall:.1f}s wall "
           f"({len(fresh)} fresh) ===")
-    for arm in arms:
+    for arm in arm_list:
         rs = [r for r in recs if r["arm"] == arm.id]
         if not rs:
             continue
@@ -474,7 +481,7 @@ def verify(workdir: pathlib.Path) -> bool:
     return p.returncode == 0
 
 
-def cmd_smoke_agent(args: argparse.Namespace) -> None:
+def cmd_smoke_agent() -> None:
     arms = [
         Arm("anthropic", "claude-haiku-4-5", None, "off"),
         Arm("openai", "gpt-5.4-nano", "low"),
@@ -506,27 +513,16 @@ def cmd_smoke_agent(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = ap.add_subparsers(dest="command", required=True)
+    import fire
 
-    subparsers.add_parser("fetch-swebench-matrix").set_defaults(func=cmd_fetch_swebench_matrix)
-    subparsers.add_parser("transfer-swebench").set_defaults(func=cmd_transfer_swebench)
-
-    sp = subparsers.add_parser("run-lcb")
-    sp.add_argument("--arms", default="cheap", choices=sorted(ARM_SETS))
-    sp.add_argument("--n", type=int, default=6, help="problems per difficulty band")
-    sp.add_argument("--workers", type=int, default=8)
     # 16 was indefensible: opus hit it on 3 hard problems having never written a solution,
     # burning $2.41-$4.41 each and scoring 0. The reference harness (mini-swe-agent) uses a
     # 250-step limit with a $3/instance cost limit; 60 is the compromise for single-file tasks.
-    sp.add_argument("--max-turns", type=int, default=60)
-    sp.add_argument("--max-concurrent", type=int, default=sandbox.DEFAULT_MAX_CONCURRENT,
-                    help="cap on live E2B sandboxes; account cap is 1100 and this lane "
-                         "must never starve another run")
-    sp.set_defaults(func=cmd_run_lcb)
-
-    subparsers.add_parser("smoke-agent").set_defaults(func=cmd_smoke_agent)
-
-    ns = ap.parse_args()
-    ns.func(ns)
+    # --max-concurrent caps live E2B sandboxes; account cap is 1100 and this lane must never
+    # starve another run.
+    fire.Fire({
+        "fetch-swebench-matrix": cmd_fetch_swebench_matrix,
+        "transfer-swebench": cmd_transfer_swebench,
+        "run-lcb": cmd_run_lcb,
+        "smoke-agent": cmd_smoke_agent,
+    })

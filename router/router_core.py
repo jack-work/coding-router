@@ -62,6 +62,7 @@ import re
 from dataclasses import dataclass
 
 import numpy as np
+from tabulate import tabulate
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EMB_CACHE = ROOT / "results" / "lcb_embeddings.json"
@@ -184,8 +185,8 @@ def main_pricing() -> None:
     ep = dict(inp=30_000, cache_read=1_200_000, cache_write=40_000, out=25_000)
     rows = sorted({a.model: a for a in arms}.values(), key=lambda a: a.cost(**ep))
     print(f"\nper-episode cost @ {ep}:")
-    for a in rows:
-        print(f"  {a.model:20s} ${a.cost(**ep):6.3f}")
+    print(tabulate([(a.model, f"${a.cost(**ep):.3f}") for a in rows], headers=["model", "cost"],
+                   disable_numparse=True))
     c = rows[0].cost(**ep)
     print(f"\nspread cheapest->priciest per episode: {rows[-1].cost(**ep)/c:.1f}x")
 
@@ -208,10 +209,11 @@ class Decision:
 
 
 class Router:
-    def __init__(self, artifact_dir: str | pathlib.Path):
+    def __init__(self, artifact_dir: str | pathlib.Path, *,
+                artifact_json: str = ARTIFACT_JSON, artifact_npz: str = ARTIFACT_NPZ):
         p = pathlib.Path(artifact_dir)
-        meta = json.loads((p / ARTIFACT_JSON).read_text())
-        arr = np.load(p / ARTIFACT_NPZ)
+        meta = json.loads((p / artifact_json).read_text())
+        arr = np.load(p / artifact_npz)
         self.meta = meta
         self.arms: list[str] = meta["arms"]
         self.arm_spec: dict = meta["arm_spec"]
@@ -259,17 +261,24 @@ class Router:
                         off_distribution=off, fallback_used=fb,
                         request_kwargs=spec["request_kwargs"])
 
-    def route(self, task_text: str, *, api_key: str | None = None) -> Decision:
-        """Embed `task_text` with the artifact's embedding model, then route."""
+    def route(self, task_text: str, *, api_key: str | None = None,
+             base_url: str | None = None) -> Decision:
+        """Embed `task_text` with the artifact's embedding model, then route.
+
+        `base_url` overrides the artifact's own `embed_base_url` (present when
+        `embed_model` isn't actually hosted by OpenAI -- e.g. a local server).
+        """
         import openai
 
-        cl = openai.OpenAI(api_key=api_key) if api_key else openai.OpenAI()
+        base_url = base_url or self.meta.get("embed_base_url")
+        cl = openai.OpenAI(api_key=api_key or ("not-needed" if base_url else None),
+                           base_url=base_url)
         e = cl.embeddings.create(model=self.meta["embed_model"],
                                  input=task_text[:8000]).data[0].embedding
         return self.route_embedding(np.array(e, dtype=float))
 
 
-def main_predict(artifact_dir: str) -> None:
+def main_predict(artifact_dir: str = "results") -> None:
     import os as _os
 
     # Demo convenience only. The module itself never reads a .env, so it stays droppable
@@ -538,17 +547,6 @@ def mcnemar(a: np.ndarray, b: np.ndarray) -> float:
 
 
 if __name__ == "__main__":
-    import argparse
+    import fire
 
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = ap.add_subparsers(dest="command", required=True)
-
-    subparsers.add_parser("arms").set_defaults(func=lambda ns: main_pricing())
-
-    sp = subparsers.add_parser("demo")
-    sp.add_argument("artifact_dir", nargs="?", default="results")
-    sp.set_defaults(func=lambda ns: main_predict(ns.artifact_dir))
-
-    ns = ap.parse_args()
-    ns.func(ns)
+    fire.Fire({"arms": main_pricing, "demo": main_predict})

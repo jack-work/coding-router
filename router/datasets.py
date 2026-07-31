@@ -11,7 +11,7 @@ WHY this file is shaped the way it is:
 The three nebius task datasets (V2 / v1 / leaderboard) contain ZERO model outcomes. Every
 column in all three is a task-definition field, so on their own they cannot supervise a
 router at all -- they are a *sweep plan*, not a matrix. That is verified here, not assumed:
-`python router/datasets_b.py swe-rebench` prints the column list it actually read.
+`python router/datasets.py swe-rebench` prints the column list it actually read.
 
 But outcomes for these instance ids do exist in two adjacent nebius dumps, and they are
 free, per-task, and -- because both dumps ship MANY rollouts per instance -- GRADED, not
@@ -94,6 +94,7 @@ from collections.abc import Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from tabulate import tabulate
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SWE_REBENCH_CACHE = ROOT / "data" / "swe_rebench"
@@ -413,13 +414,14 @@ def main_swe_rebench() -> None:
     filled = sum(not math.isnan(v) for row in score for v in row)
     print(f"\npool=free  n_arms={len(arms)}  n_tasks={len(tasks)}  "
           f"cells={n_cells:,} filled={filled:,} sparsity={1 - filled / n_cells:.3f}")
-    print(f"{'arm':34s} {'tasks':>6s} {'mean score':>11s} {'rollouts/task':>14s} "
-          f"{'infra dropped':>14s}")
+    table = []
     for i, a in enumerate(arms):
         vals = [v for v in score[i] if not math.isnan(v)]
         roll = [r for r in d["rollouts"][i] if r]
-        print(f"{a:34s} {len(vals):6d} {sum(vals)/len(vals):11.4f} "
-              f"{sum(roll)/len(roll):14.1f} {d['dropped'][a]['infra']:14d}")
+        table.append((a, len(vals), f"{sum(vals)/len(vals):.4f}",
+                      f"{sum(roll)/len(roll):.1f}", d["dropped"][a]["infra"]))
+    print(tabulate(table, headers=["arm", "tasks", "mean score", "rollouts/task", "infra dropped"],
+                   disable_numparse=True))
     graded = sum(1 for i in range(len(arms)) for j in range(len(tasks))
                  if d["rollouts"][i][j] > 1 and not math.isnan(score[i][j]))
     frac01 = sum(1 for row in score for v in row if not math.isnan(v) and v in (0.0, 1.0))
@@ -575,10 +577,11 @@ def main_deepswe() -> None:
           f"max={max(d['difficulty'].values()):.3f}")
 
     binary = load_deepswe("passed")["score"]
-    print(f"\n{'arm':<44}{'f2p':>7}{'pass@1':>8}{'$/task':>8}{'n':>5}")
-    for i in sorted(range(n_a), key=lambda i: -_mean(score[i])):
-        print(f"{arms[i]:<44}{_mean(score[i]):>7.3f}{_mean(binary[i]):>8.3f}"
-              f"{_mean(cost[i]):>8.2f}{sum(v is not None for v in score[i]):>5}")
+    table = [(arms[i], f"{_mean(score[i]):.3f}", f"{_mean(binary[i]):.3f}",
+              f"{_mean(cost[i]):.2f}", sum(v is not None for v in score[i]))
+             for i in sorted(range(n_a), key=lambda i: -_mean(score[i]))]
+    print()
+    print(tabulate(table, headers=["arm", "f2p", "pass@1", "$/task", "n"], disable_numparse=True))
 
     # Routing headroom, computed binary so it is comparable to a published pass@1. "solves" means
     # the arm's majority of trials passed; unpriced cells are excluded from the cost sums rather
@@ -599,14 +602,6 @@ def main_deepswe() -> None:
 
 
 if __name__ == "__main__":
-    import argparse
+    import fire
 
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = ap.add_subparsers(dest="command", required=True)
-
-    subparsers.add_parser("swe-rebench").set_defaults(func=lambda ns: main_swe_rebench())
-    subparsers.add_parser("deepswe").set_defaults(func=lambda ns: main_deepswe())
-
-    ns = ap.parse_args()
-    ns.func(ns)
+    fire.Fire({"swe-rebench": main_swe_rebench, "deepswe": main_deepswe})

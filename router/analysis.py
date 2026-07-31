@@ -10,7 +10,6 @@ The production export step (freezing the router artifact) is a separate CLI: rou
 """
 from __future__ import annotations
 
-import argparse
 import collections
 import glob
 import itertools
@@ -20,6 +19,8 @@ import re
 import statistics
 import sys
 from collections import Counter
+
+from tabulate import tabulate
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from router.router_core import STANDARD  # noqa: E402
@@ -42,7 +43,7 @@ def load_episodes() -> list[dict]:
             for f in glob.glob(str(ROOT / "results" / "episodes" / "*.json"))]
 
 
-def cmd_analyze_phase1(args) -> None:
+def cmd_analyze_phase1() -> None:
     recs = [r for r in load_episodes() if "arm" in r]
     qids = sorted({r["qid"] for r in recs})
     # Drop arms that were never swept over the full problem set (e.g. a leftover smoke-test
@@ -110,10 +111,10 @@ def cmd_analyze_phase1(args) -> None:
                      "per": cost / len(rs),
                      "med_s": statistics.median([r.get("total_wall_s", 0) for r in rs])})
     rows.sort(key=lambda r: r["per"])
-    print(f"  {'arm':28s} {'n':>4s} {'acc':>7s} {'$/prob':>8s} {'total$':>8s} {'med s':>6s}")
-    for r in rows:
-        print(f"  {r['arm']:28s} {r['n']:4d} {r['acc']*100:6.1f}% {r['per']:8.4f} "
-              f"{r['cost']:8.3f} {r['med_s']:6.1f}")
+    print(tabulate(
+        [(r["arm"], r["n"], f"{r['acc']*100:.1f}%", f"{r['per']:.4f}", f"{r['cost']:.3f}",
+          f"{r['med_s']:.1f}") for r in rows],
+        headers=["arm", "n", "acc", "$/prob", "total$", "med s"], disable_numparse=True))
 
     # Pareto frontier: an arm is dominated if something cheaper is at least as accurate.
     front = [r for r in rows if not any(o["per"] < r["per"] and o["acc"] >= r["acc"] for o in rows)]
@@ -125,14 +126,15 @@ def cmd_analyze_phase1(args) -> None:
     print("\n=== accuracy by difficulty ===")
     diff = {r["qid"]: r["difficulty"] for r in recs}
     bands = ("easy", "medium", "hard")
-    print(f"  {'arm':28s} " + " ".join(f"{b:>8s}" for b in bands))
+    diff_table = []
     for r in rows:
         out = []
         for b in bands:
             g = [cell[(r["arm"], q)] for q in ok_q
                  if (r["arm"], q) in cell and diff.get(q) == b]
-            out.append(f"{sum(1 for x in g if x.get('resolved'))/len(g)*100:7.1f}%" if g else "     -  ")
-        print(f"  {r['arm']:28s} " + " ".join(out))
+            out.append(f"{sum(1 for x in g if x.get('resolved'))/len(g)*100:.1f}%" if g else "-")
+        diff_table.append((r["arm"], *out))
+    print(tabulate(diff_table, headers=["arm", *bands], disable_numparse=True))
 
     # ---------------------------------------------------------------- routing headroom
     print("\n=== ROUTING HEADROOM on our measured arms ===")
@@ -250,7 +252,7 @@ def arm_stats(raw, subs, inst):
     return sorted(rows, key=lambda r: r["cost"])
 
 
-def cmd_headroom(args) -> None:
+def cmd_headroom() -> None:
     for cohort_only in (True, False):
         tag = ("CLEAN v2.0.0 COHORT (same scaffold, same day)" if cohort_only else
                "ALL SUBMISSIONS (scaffold varies - confounded)")
@@ -259,9 +261,10 @@ def cmd_headroom(args) -> None:
         rows = arm_stats(raw, subs, inst)
         n = len(inst)
         print(f"{len(subs)} arms x {n} instances\n")
-        print(f"  {'arm':38s} {'acc':>7s} {'total$':>9s} {'$/inst':>8s}")
-        for r in rows:
-            print(f"  {r['arm'][:38]:38s} {r['acc']*100:6.1f}% {r['cost']:9.2f} {r['cost']/n:8.3f}")
+        print(tabulate(
+            [(r["arm"][:38], f"{r['acc']*100:.1f}%", f"{r['cost']:.2f}", f"{r['cost']/n:.3f}")
+             for r in rows],
+            headers=["arm", "acc", "total$", "$/inst"], disable_numparse=True))
 
         best = max(rows, key=lambda r: r["acc"])
         cheapest = rows[0]
@@ -332,7 +335,7 @@ for any cost-saving claim on real traffic.
 PRICE_ALIAS = {"claude-opus-5": "claude-opus-4-8", "claude-sonnet-4-6": "claude-sonnet-5"}
 
 
-def cmd_price_traces(args) -> None:
+def cmd_price_traces() -> None:
     rows = [json.loads(line) for line in (ROOT / "results" / "trace_tasks.jsonl").open()]
     sessions = [r for r in rows
                 if r["trace_type"] == "claude-code" and r["cache_read"] > 0]
@@ -420,7 +423,7 @@ def is_machine(prompt: str) -> bool:
     return any(s.startswith(x) for x in MACHINE_PREFIXES)
 
 
-def cmd_extract_traces(args) -> None:
+def cmd_extract_traces() -> None:
     sessions: dict[str, dict] = {}
     files = sorted(TRACE_DATA.glob("*.jsonl"))
     assert files, f"no trace files under {TRACE_DATA}"
@@ -521,14 +524,11 @@ def cmd_extract_traces(args) -> None:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = ap.add_subparsers(dest="command", required=True)
+    import fire
 
-    subparsers.add_parser("analyze-phase1").set_defaults(func=cmd_analyze_phase1)
-    subparsers.add_parser("headroom").set_defaults(func=cmd_headroom)
-    subparsers.add_parser("price-traces").set_defaults(func=cmd_price_traces)
-    subparsers.add_parser("extract-traces").set_defaults(func=cmd_extract_traces)
-
-    ns = ap.parse_args()
-    ns.func(ns)
+    fire.Fire({
+        "analyze-phase1": cmd_analyze_phase1,
+        "headroom": cmd_headroom,
+        "price-traces": cmd_price_traces,
+        "extract-traces": cmd_extract_traces,
+    })
