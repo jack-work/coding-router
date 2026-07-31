@@ -2,7 +2,8 @@
 
 Routes every coding-agent request to the cheapest OpenAI/Anthropic model likely to solve it,
 via kNN over measured outcomes. One local OpenAI-compatible endpoint; point opencode (or any
-openai-compatible client) at it.
+openai-compatible client) at it. This repo is the product only — the research lab that builds
+and validates the routing artifact lives in world-model-optimizer's `packages/router-lab`.
 
 ## Run
 
