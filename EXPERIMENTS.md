@@ -254,8 +254,18 @@ mid-episode switching, $25 total spend), and trained routing crushes statics/lad
 LCB — but per-task (turn0) granularity is not beaten on this benchmark. Next per-turn
 test needs either injected mid-episode difficulty on LCB or a live long-horizon domain.
 
-## EXP-006 — 8B anchored LoRA (QUEUED after EXP-005, 2026-07-31)
+## EXP-006 — 8B anchored LoRA (2026-07-31)
 
 **Setup.** `train_softknn_v2_150.py` (150 steps), lora mode, 8b, beta=0.2, 6 seeds,
 GPU1 same tmux chain. The quality-frontier bet: anchored geometry training on the
 bigger encoder.
+
+**Result.** 5.69x, graded 0.897 (delta -0.036, CI [-0.065, -0.011]). Best LoRA
+quality profile in the 5-6x tier, and selected checkpoints skew LATE (140-150 vs
+0.6B's 10-100) — the bigger encoder + anchor overfits much slower per step. Still a
+real quality cost (CI excludes 0) and does not dominate the factor-head champion
+(5.33x/-0.027 fresh-seed), which trains in seconds instead of 13 GPU-hours.
+
+**Verdict.** Geometry fine-tuning at 8B is viable but not worth it on this data size;
+champion unchanged. If more labelled tasks ever arrive, revisit (the slow-overfit
+trend suggests 8B LoRA scales with n better than 0.6B).
