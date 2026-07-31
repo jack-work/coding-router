@@ -32,24 +32,29 @@ from router.router_core import Arm  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # ============================================================ fetch-swebench-matrix
-"""Download the published bash-only outcome matrix from SWE-bench/experiments.
-
-Every submission under evaluation/bash-only ran the SAME mini-swe-agent bash-only
-scaffold on the SAME 500 SWE-bench Verified instances, varying only the model. Each
-ships per_instance_details.json with {resolved, cost, api_calls} per instance.
-
-That is a free, published, controlled (model x instance) outcome matrix WITH cost --
-exactly what a router needs to learn from. Provenance is public, so every number here
-is published-not-measured and must be labelled as such downstream.
-
-Writes results/swebench_matrix.json.
-"""
+# Every submission under evaluation/bash-only ran the SAME mini-swe-agent bash-only
+# scaffold on the SAME 500 SWE-bench Verified instances, varying only the model. Each
+# ships per_instance_details.json with {resolved, cost, api_calls} per instance -- a
+# free, published, controlled (model x instance) outcome matrix WITH cost. Provenance
+# is public, so every number here is published-not-measured and must be labelled as such
+# downstream. Writes results/swebench_matrix.json.
 
 SWEBENCH_REPO = "SWE-bench/experiments"
 SWEBENCH_BASE = "evaluation/bash-only"
 
 
 def gh_json(path: str):
+    """Call `gh api <path>` and parse the JSON response.
+
+    Args:
+        path: A GitHub API path, relative to the API root.
+
+    Returns:
+        The parsed JSON response.
+
+    Raises:
+        RuntimeError: If the `gh` invocation fails.
+    """
     out = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=120)
     if out.returncode != 0:
         raise RuntimeError(out.stderr[:300])
@@ -57,11 +62,22 @@ def gh_json(path: str):
 
 
 def gh_file(path: str) -> bytes:
+    """Fetch one file's raw bytes via the GitHub contents API."""
     d = gh_json(path)
     return base64.b64decode(d["content"])
 
 
 def fetch_submission(name: str) -> tuple[str, dict | None]:
+    """Fetch one SWE-bench/experiments submission's per-instance details and metadata.
+
+    Args:
+        name: Submission directory name under `SWEBENCH_BASE`.
+
+    Returns:
+        A (name, payload) pair. `payload` is `{"error": ...}` on failure, otherwise
+        `{"meta": ..., "details": ...}` -- a raw parsed copy of that submission's own
+        published files, shape owned by the publisher, not by us.
+    """
     try:
         details = json.loads(gh_file(
             f"repos/{SWEBENCH_REPO}/contents/{SWEBENCH_BASE}/{name}/per_instance_details.json"))
@@ -83,6 +99,7 @@ def fetch_submission(name: str) -> tuple[str, dict | None]:
 
 
 def cmd_fetch_swebench_matrix() -> None:
+    """CLI (`fetch-swebench-matrix`): download every bash-only submission and write the matrix."""
     dirs = [d["name"] for d in gh_json(f"repos/{SWEBENCH_REPO}/contents/{SWEBENCH_BASE}")
             if d["type"] == "dir"]
     print(f"{len(dirs)} submissions found")
@@ -110,24 +127,27 @@ def cmd_fetch_swebench_matrix() -> None:
 
 
 # ============================================================ transfer-swebench
-"""Transfer test: does the SAME kNN policy beat always-best on a different dataset?
-
-DeepSWE gave 2.15x, but that is one dataset. This runs the identical policy on the only
-other free matrix that carries per-instance cost: the SWE-bench bash-only archive (40
-same-scaffold submissions x 500 SWE-bench Verified instances, each with resolved + cost).
-
-Different tasks, different scaffold, different arm pool, and BINARY labels rather than
-graded. If kNN wins here too, the method transfers. If it does not, the DeepSWE result is a
-property of that dataset rather than of the router -- which is exactly what needs ruling out.
-
-Repo-grouped CV: SWE-bench instance ids are `<org>__<repo>-<number>`, and instances from one
-repo share code, so the repo is the grouping unit.
-"""
+# Transfer test: does the SAME kNN policy beat always-best on a different dataset?
+# DeepSWE gave 2.15x, but that is one dataset. This runs the identical policy on the only
+# other free matrix that carries per-instance cost: the SWE-bench bash-only archive (40
+# same-scaffold submissions x 500 SWE-bench Verified instances, each with resolved + cost).
+# Different tasks, different scaffold, different arm pool, and BINARY labels rather than
+# graded -- if kNN wins here too, the method transfers rather than being a property of
+# the DeepSWE dataset specifically.
+#
+# Repo-grouped CV: SWE-bench instance ids are `<org>__<repo>-<number>`, and instances from
+# one repo share code, so the repo is the grouping unit.
 
 TRANSFER_EMB = ROOT / "results" / "swebench_embeddings.json"
 
 
 def build() -> route.Matrix:
+    """Load the published SWE-bench bash-only matrix into a `Matrix`.
+
+    Returns:
+        The (arm x instance) matrix, restricted to instances every kept submission
+        has a result for, with broken (0-resolved, non-trivial-spend) submissions excluded.
+    """
     raw = json.loads((ROOT / "results" / "swebench_matrix.json").read_text())
     subs = sorted(raw)
     # Drop the broken submission: 0 resolved on $480 of spend is a failed run, not a result.
@@ -155,7 +175,11 @@ def build() -> route.Matrix:
 
 
 def embed(m: route.Matrix) -> None:
-    """Embed the problem statements from SWE-bench Verified, cached on disk."""
+    """Embed the problem statements from SWE-bench Verified, cached on disk.
+
+    Args:
+        m: The matrix to attach embeddings to; mutates `m.emb` in place.
+    """
     cache = json.loads(TRANSFER_EMB.read_text()) if TRANSFER_EMB.exists() else {}
     missing = [q for q in m.qids if q not in cache]
     if missing:
@@ -176,6 +200,7 @@ def embed(m: route.Matrix) -> None:
 
 
 def cmd_transfer_swebench() -> None:
+    """CLI (`transfer-swebench`): race routing policies on the SWE-bench bash-only matrix."""
     load_env()
     m = build()
     embed(m)
@@ -217,47 +242,53 @@ def cmd_transfer_swebench() -> None:
 
 
 # ============================================================ run-lcb
-"""Run agentic LiveCodeBench episodes and report wall-clock, cost, and resolve.
-
-Purpose is to establish the inner-loop speed empirically. Episodes run concurrently;
-per-episode results are checkpointed atomically so nothing is ever paid for twice.
-
-Usage:
-  uv run python -m router.benchmarks run-lcb --arms cheap --n 6 --workers 6
-"""
+# Run agentic LiveCodeBench episodes and report wall-clock, cost, and resolve. Purpose is
+# to establish the inner-loop speed empirically. Episodes run concurrently; per-episode
+# results are checkpointed atomically so nothing is ever paid for twice.
+#
+# Usage:
+#   uv run python -m router.benchmarks run-lcb --arms cheap --n 6 --workers 6
 
 LCB_OUT = ROOT / "results" / "episodes"
 
 ARM_SETS = {
     # Two extremes plus a mid arm: enough to see a gradient without spending.
-    "cheap": [Arm("openai", "gpt-5.4-nano", "low"),
-              Arm("anthropic", "claude-haiku-4-5", None, "off")],
+    "cheap": [Arm(provider="openai", model="gpt-5.4-nano", effort="low"),
+              Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="off")],
     # Isolates the one variable that made haiku look broken: reasoning on vs off.
     # nano@low reasons; haiku@off does not. Comparing them conflates model with config.
-    "haiku-thinking": [Arm("anthropic", "claude-haiku-4-5", None, "off"),
-                       Arm("anthropic", "claude-haiku-4-5", None, "budget")],
-    "ladder": [Arm("openai", "gpt-5.4-nano", "low"),
-               Arm("openai", "gpt-5.4-mini", "medium"),
-               Arm("anthropic", "claude-haiku-4-5", None, "budget"),
-               Arm("anthropic", "claude-sonnet-5", "medium", "adaptive")],
+    "haiku-thinking": [Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="off"),
+                       Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="budget")],
+    "ladder": [Arm(provider="openai", model="gpt-5.4-nano", effort="low"),
+               Arm(provider="openai", model="gpt-5.4-mini", effort="medium"),
+               Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="budget"),
+               Arm(provider="anthropic", model="claude-sonnet-5", effort="medium", thinking="adaptive")],
     # Phase 1: the candidate ladder, spanning ~50x list price. Two efforts on each cheap
     # model because the nano-beats-haiku result suggests reasoning config may matter more
     # than model tier on this task family -- that is the hypothesis this run tests.
-    "full": [Arm("openai", "gpt-5.4-nano", "low"),
-             Arm("openai", "gpt-5.4-nano", "high"),
-             Arm("openai", "gpt-5.4-mini", "medium"),
-             Arm("openai", "gpt-5.4-mini", "xhigh"),
-             Arm("anthropic", "claude-haiku-4-5", None, "budget"),
-             Arm("openai", "gpt-5.3-codex", "high"),
-             Arm("openai", "gpt-5.4", "medium"),
-             Arm("anthropic", "claude-sonnet-5", "medium", "adaptive"),
-             Arm("anthropic", "claude-opus-4-8", "medium", "adaptive")],
+    "full": [Arm(provider="openai", model="gpt-5.4-nano", effort="low"),
+             Arm(provider="openai", model="gpt-5.4-nano", effort="high"),
+             Arm(provider="openai", model="gpt-5.4-mini", effort="medium"),
+             Arm(provider="openai", model="gpt-5.4-mini", effort="xhigh"),
+             Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="budget"),
+             Arm(provider="openai", model="gpt-5.3-codex", effort="high"),
+             Arm(provider="openai", model="gpt-5.4", effort="medium"),
+             Arm(provider="anthropic", model="claude-sonnet-5", effort="medium", thinking="adaptive"),
+             Arm(provider="anthropic", model="claude-opus-4-8", effort="medium", thinking="adaptive")],
 }
 
 
 def bash_tool(session: sandbox.SandboxSession) -> Tool:
-    """Agent's bash, executed in the E2B sandbox -- never on this machine."""
+    """Build the agent's bash tool, executed in the E2B sandbox -- never on this machine.
+
+    Args:
+        session: The sandbox session to run commands in.
+
+    Returns:
+        A `Tool` that runs a shell command and returns exit code, stdout, and stderr.
+    """
     def run(args: dict) -> str:
+        """Run `args["command"]` in the sandbox and format its exit code/stdout/stderr."""
         cmd = args.get("command", "")
         if not cmd:
             return "error: empty command"
@@ -278,6 +309,19 @@ def bash_tool(session: sandbox.SandboxSession) -> Tool:
 
 
 def episode(job) -> dict:
+    """Run (or load a cached) LiveCodeBench episode for one (problem, arm) pair.
+
+    Args:
+        job: A (problem, arm, max_turns) tuple.
+
+    Returns:
+        A record dict describing the outcome. Shape is deliberately sparse rather
+        than fixed: a successful run has ~20 fields (outcome/graded/turns/...), while
+        a harness-level exception (caught below) writes only a handful (qid/arm/
+        resolved/harness_error/...) -- downstream readers use `.get(key, default)`
+        precisely because a key can be genuinely absent, not just falsy. This is a
+        raw episode-log record, not a fixed reused shape.
+    """
     prob, arm, max_turns = job
     key = f"{prob.qid}__{arm.id.replace('/', '-')}"
     dest = LCB_OUT / f"{key}.json"
@@ -348,6 +392,23 @@ def episode(job) -> dict:
 
 def cmd_run_lcb(arms: str = "cheap", n: int = 6, workers: int = 8, max_turns: int = 60,
                 max_concurrent: int = sandbox.DEFAULT_MAX_CONCURRENT) -> None:
+    """CLI (`run-lcb`): run agentic LiveCodeBench episodes and print per-arm results.
+
+    Args:
+        arms: Which entry of `ARM_SETS` to sweep.
+        n: Number of problems per difficulty band (easy/medium/hard) to sample.
+        workers: Number of episodes to run concurrently.
+        max_turns: Maximum agent turns per episode. 16 was tried and was indefensible:
+            opus hit it on 3 hard problems having never written a solution, burning
+            $2.41-$4.41 each and scoring 0. The reference harness (mini-swe-agent) uses
+            a 250-step limit with a $3/instance cost cap; 60 is the compromise here for
+            single-file tasks.
+        max_concurrent: Cap on live E2B sandboxes; account cap is 1100 and this lane
+            must never starve another run.
+
+    Raises:
+        ValueError: If `arms` is not a key of `ARM_SETS`.
+    """
     if arms not in ARM_SETS:
         raise ValueError(f"arms must be one of {sorted(ARM_SETS)}, got {arms!r}")
     load_env()
@@ -408,15 +469,13 @@ def cmd_run_lcb(arms: str = "cheap", n: int = 6, workers: int = 8, max_turns: in
 
 
 # ============================================================ smoke-agent
-"""End-to-end correctness check of the agent loop on a real, verifiable task.
-
-Not a science probe — an assert that the tool loop, history round-tripping, and
-usage accounting work identically on both providers. Costs a few cents.
-
-The task is deliberately one that cannot be solved in a single turn without
-running anything: a buggy function plus a failing test the agent must actually
-execute to see the failure.
-"""
+# End-to-end correctness check of the agent loop on a real, verifiable task. Not a
+# science probe -- an assert that the tool loop, history round-tripping, and usage
+# accounting work identically on both providers. Costs a few cents.
+#
+# The task is deliberately one that cannot be solved in a single turn without running
+# anything: a buggy function plus a failing test the agent must actually execute to see
+# the failure.
 
 SMOKE_BUGGY = '''\
 def rolling_max(xs):
@@ -452,7 +511,16 @@ SMOKE_TASK = (
 
 
 def make_bash_tool(workdir: pathlib.Path) -> Tool:
+    """Build a bash tool that runs commands directly in `workdir` (no sandbox).
+
+    Args:
+        workdir: The repo working directory to run commands in.
+
+    Returns:
+        A `Tool` that runs a shell command and returns exit code, stdout, and stderr.
+    """
     def run(args: dict) -> str:
+        """Run `args["command"]` in `workdir` and format its exit code/stdout/stderr."""
         cmd = args.get("command", "")
         try:
             p = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True,
@@ -482,9 +550,10 @@ def verify(workdir: pathlib.Path) -> bool:
 
 
 def cmd_smoke_agent() -> None:
+    """CLI (`smoke-agent`): run the buggy-function task on both providers and assert success."""
     arms = [
-        Arm("anthropic", "claude-haiku-4-5", None, "off"),
-        Arm("openai", "gpt-5.4-nano", "low"),
+        Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="off"),
+        Arm(provider="openai", model="gpt-5.4-nano", effort="low"),
     ]
     for arm in arms:
         work = pathlib.Path(tempfile.mkdtemp(prefix="smoke-"))
@@ -504,7 +573,7 @@ def cmd_smoke_agent() -> None:
             print(f"  cost / wall   : ${res.cost_usd:.5f} / {res.wall_s}s")
             if res.error:
                 print(f"  ERROR         : {res.error}")
-            tools_used = sum(len(t.get("calls") or []) for t in res.transcript)
+            tools_used = sum(len(t.calls) for t in res.transcript)
             print(f"  tool calls    : {tools_used}")
             assert res.usage.requests >= 1, "no requests recorded"
             assert tools_used >= 1, "agent never called a tool"
@@ -515,11 +584,6 @@ def cmd_smoke_agent() -> None:
 if __name__ == "__main__":
     import fire
 
-    # 16 was indefensible: opus hit it on 3 hard problems having never written a solution,
-    # burning $2.41-$4.41 each and scoring 0. The reference harness (mini-swe-agent) uses a
-    # 250-step limit with a $3/instance cost limit; 60 is the compromise for single-file tasks.
-    # --max-concurrent caps live E2B sandboxes; account cap is 1100 and this lane must never
-    # starve another run.
     fire.Fire({
         "fetch-swebench-matrix": cmd_fetch_swebench_matrix,
         "transfer-swebench": cmd_transfer_swebench,

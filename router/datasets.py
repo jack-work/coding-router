@@ -1,83 +1,6 @@
-"""Dataset loaders: SWE-rebench family + DeepSWE v1.1 -- FREE routing supervision.
-
-Two pure loaders with no cross-references to each other. `load_deepswe()` is used by
-experiments.py/analysis.py.
-
-======================================================================== swe_rebench
-SWE-rebench family loader: task pools for our own sweep + the only FREE labels that exist.
-
-WHY this file is shaped the way it is:
-
-The three nebius task datasets (V2 / v1 / leaderboard) contain ZERO model outcomes. Every
-column in all three is a task-definition field, so on their own they cannot supervise a
-router at all -- they are a *sweep plan*, not a matrix. That is verified here, not assumed:
-`python router/datasets.py swe-rebench` prints the column list it actually read.
-
-But outcomes for these instance ids do exist in two adjacent nebius dumps, and they are
-free, per-task, and -- because both dumps ship MANY rollouts per instance -- GRADED, not
-binary. A per-task pass rate over ~10-21 rollouts is exactly the continuous label the
-binary-overstates-the-tier-gap lesson says we need:
-
-  * nebius/SWE-agent-trajectories   80,036 rollouts, `model_name` in {llama-8b, -70b, -405b}
-                                    -> a same-scaffold 3-tier ladder (the routable part)
-  * nebius/SWE-rebench-openhands-trajectories  67,074 rollouts, resolved 0/1, and NO model
-                                    column at all. The repo's own config.toml sets
-                                    [llm] model = "qwen3-coder-480b-a35b-instruct", but the
-                                    parquet does not name a model per row, so the arm is
-                                    labelled `openhands:model-unrecorded` -- UNVERIFIED.
-
-Two things are deliberately NOT smoothed over:
-  * The two dumps use DIFFERENT scaffolds (SWE-agent vs OpenHands). Comparing across them
-    breaks the "only the model differs" invariant router_core.py depends on, so the
-    scaffold is part of every arm name and `notes` says so. The clean routing sub-matrix is
-    the three swe-agent arms.
-  * Infrastructure stops are dropped from the denominator instead of being scored as model
-    failures (this has bitten us four times). `exit_status` drives that, and the summary
-    prints how many rollouts each rule removed.
-
-Cost: NOT AVAILABLE. No cost/token field exists in any of the five datasets, and the public
-swe-rebench.com leaderboard only publishes per-model averages, so `cost` is None by design.
-
-Pools:
-  free        -- instances that have >=`min_arms` free-label arms. Runs today, real numbers.
-  v2_python   -- the 7,243 parse_log_pytest rows of SWE-rebench-V2 (sweep target).
-  v2_all      -- all 32,079 V2 rows (30+ non-python log parsers; the hidden work).
-  leaderboard -- the 860-row post-cutoff pool (15 monthly splits, union == `test`).
-The three sweep pools have no labels, so they read our own episodes from
-results/episodes_swerebench/*.json and RAISE if that directory is empty rather than
-inventing a matrix.
-
-======================================================================== deepswe
-DeepSWE v1.1 (Datacurve) -> router supervision matrix, from FREE published labels.
-
-Why this exists: this is the only SWE-shaped source we have found that already ships a dense
-(arm x task) outcome table, so we get routing supervision without spending a GPU-hour or an API
-dollar. 50 configs (18 models x reasoning effort, all on ONE harness -- mini-swe-agent -- so the
-arms are comparable) x 113 long-horizon tasks, backed by 22,586 individual rollouts, ~4 per cell.
-
-Worth loading over SWE-bench Verified because it is not saturated and every task is routable:
-main_deepswe() recomputes best single arm, the any-arm oracle, and the all-arms/no-arms counts.
-
-Three project lessons are handled explicitly here rather than assumed away:
-  * GRADED, not binary. `f2p_passed/f2p_total` is the fail-to-pass test fraction and is strictly
-    intermediate on 41% of scored rows, so the default metric="f2p" is a real [0,1] score.
-    `partial` also exists but is diluted by the p2p regression suite -- prefer f2p.
-  * Infra failure != model failure. Rows with included_in_score=False (model_routing_404,
-    provider_timeout, verifier_timeout, ...) are MISSING DATA and are dropped, which leaves 2 of
-    5,650 cells empty; those come back as None, never 0.0. Rows the publisher deliberately scored
-    as failures (agent_timeout, context_window_exceeded) have included_in_score=True and are kept
-    as failures -- that is what reproduces the published leaderboard, verified by _crosscheck().
-  * No invented numbers. There is NO explicit difficulty/rating field anywhere (checked
-    tasks.json, task.toml, manifest.json), so `difficulty` is DERIVED: the task's mean binary pass
-    rate across arms. `cost` is None on the 5 cells with no priced trial (Fable-5 on one task).
-
-Sources, fetched on first call and cached under data/deepswe/:
-  * labels      https://deepswe.datacurve.ai/artifacts/v1.1/trials.json    (no auth, 37.3 MB)
-  * tasks       https://deepswe.datacurve.ai/artifacts/v1/tasks.json       (no auth)
-  * leaderboard https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json (cross-check)
-  * prompts     github.com/datacurve-ai/deep-swe tarball (Apache-2.0) -- tasks.json carries only a
-    one-line description, so the real agent prompt (instruction.md) has to come from the repo.
-The HF mirrors (datacurve/deep-swe, datacurve/deep-swe-leaderboard) are gated and are NOT used.
+"""Dataset loaders: the SWE-rebench family (task pools plus free outcome labels) and
+DeepSWE v1.1 (a dense arm x task outcome matrix). Two independent loaders with no
+cross-references; `load_deepswe()` is used by experiments.py/export.py.
 """
 from __future__ import annotations
 
@@ -120,7 +43,12 @@ V1_FILES = (
 )
 V1_DEF_COLS = ("instance_id", "repo", "created_at", "problem_statement", "meta",
                "FAIL_TO_PASS", "PASS_TO_PASS", "image_name", "install_config")
+# 80,036 rollouts, `model_name` in {llama-8b, -70b, -405b} on one scaffold -- a routable
+# same-scaffold 3-tier ladder.
 OPENHANDS_FILE = "datasets/nebius/SWE-rebench-openhands-trajectories/trajectories.parquet"
+# 67,074 rollouts, resolved 0/1, and NO model column at all. The repo's own config.toml
+# sets [llm] model = "qwen3-coder-480b-a35b-instruct", but the parquet does not name a
+# model per row, so the arm below is labelled "openhands:model-unrecorded" -- UNVERIFIED.
 SWEAGENT_FILES = tuple(
     f"datasets/nebius/SWE-agent-trajectories/data/train-{i:05d}-of-00012.parquet"
     for i in range(12)
@@ -138,6 +66,15 @@ SWEAGENT_LIMIT = ("exit_context", "exit_format")
 
 # ------------------------------------------------------------------ swe_rebench: download / cache
 def _fetch_swe_rebench(url: str, dest: pathlib.Path) -> pathlib.Path:
+    """Download `url` to `dest` if not already cached there.
+
+    Args:
+        url: Source URL.
+        dest: Local cache path.
+
+    Returns:
+        `dest`, whether freshly downloaded or already present.
+    """
     if dest.exists() and dest.stat().st_size > 0:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +91,14 @@ def _hf_project(files: Iterable[str], columns: Iterable[str], dest: pathlib.Path
 
     The two trajectory dumps are GBs of conversation text; we want a handful of scalar
     columns. Column projection over range requests avoids downloading the rest.
+
+    Args:
+        files: HF repo-relative parquet file paths to read and concatenate.
+        columns: Column names to project.
+        dest: Local cache path for the projected table.
+
+    Returns:
+        The concatenated, column-projected table.
     """
     if dest.exists():
         return pq.read_table(dest)
@@ -171,6 +116,7 @@ def _hf_project(files: Iterable[str], columns: Iterable[str], dest: pathlib.Path
 
 
 def _v2_table() -> pa.Table:
+    """Fetch and load the SWE-rebench-V2 task-definition table (no outcome labels)."""
     path = _fetch_swe_rebench(V2_URL, SWE_REBENCH_CACHE / "v2_train.parquet")
     return pq.read_table(path, columns=["instance_id", "repo", "language", "created_at",
                                         "problem_statement", "install_config", "meta",
@@ -178,7 +124,12 @@ def _v2_table() -> pa.Table:
 
 
 def _leaderboard_table() -> tuple[pa.Table, dict[str, str]]:
-    """Returns the 860-row union plus instance_id -> monthly split (the post-cutoff key)."""
+    """Fetch the SWE-rebench leaderboard pool.
+
+    Returns:
+        The 860-row union table, plus instance_id -> monthly split (the post-cutoff
+        contamination key).
+    """
     month_of: dict[str, str] = {}
     for m in LB_MONTHS:
         t = pq.read_table(_fetch_swe_rebench(LB_URL.format(split=m), SWE_REBENCH_CACHE / f"lb_{m}.parquet"),
@@ -193,6 +144,7 @@ def _leaderboard_table() -> tuple[pa.Table, dict[str, str]]:
 
 
 def _v1_defs() -> pa.Table:
+    """Fetch and load the SWE-rebench v1 task-definition columns."""
     return _hf_project(V1_FILES, V1_DEF_COLS, SWE_REBENCH_CACHE / "v1_defs.parquet")
 
 
@@ -203,14 +155,26 @@ class Cell:
     __slots__ = ("passed", "kept", "infra", "limit")
 
     def __init__(self) -> None:
+        """Start an empty cell with all counters at zero."""
         self.passed = self.kept = self.infra = self.limit = 0
 
     @property
     def score(self) -> float | None:
+        """Pass rate over kept rollouts, or None if none were kept."""
         return self.passed / self.kept if self.kept else None
 
 
 def _classify(exit_status: str | None, infra: tuple[str, ...], limit: tuple[str, ...]) -> str:
+    """Classify one rollout's exit status as infra failure, turn/context limit, or ok.
+
+    Args:
+        exit_status: The raw exit-status string from the trajectory dump.
+        infra: Substrings that indicate a harness/infra failure (dropped, not scored).
+        limit: Substrings that indicate a turn/context limit (kept as a model failure).
+
+    Returns:
+        One of "infra", "limit", or "ok".
+    """
     s = exit_status or ""
     if any(k in s for k in infra):
         return "infra"
@@ -218,6 +182,12 @@ def _classify(exit_status: str | None, infra: tuple[str, ...], limit: tuple[str,
 
 
 def _openhands_cells() -> dict[str, dict[str, Cell]]:
+    """Build the single OpenHands arm's per-task cells from its trajectory dump.
+
+    Returns:
+        A one-entry dict, keyed "openhands:model-unrecorded" (the parquet names no
+        per-row model -- see the comment on OPENHANDS_FILE above).
+    """
     t = _hf_project([OPENHANDS_FILE], ["instance_id", "resolved", "exit_status"],
                     SWE_REBENCH_CACHE / "outcomes_openhands.parquet")
     out: dict[str, Cell] = collections.defaultdict(Cell)
@@ -236,6 +206,15 @@ def _openhands_cells() -> dict[str, dict[str, Cell]]:
 
 
 def _sweagent_cells() -> dict[str, dict[str, Cell]]:
+    """Build the three SWE-agent-scaffold arms' per-task cells from the trajectory dump.
+
+    These three arms (llama-8b/70b/405b, same scaffold) are the clean routing
+    sub-matrix: comparing across them doesn't break the "only the model differs"
+    invariant router_core.py depends on, unlike comparing against the OpenHands arm.
+
+    Returns:
+        Arm id ("swe-agent:<model>") -> task id -> `Cell`.
+    """
     t = _hf_project(SWEAGENT_FILES, ["instance_id", "model_name", "target", "exit_status"],
                     SWE_REBENCH_CACHE / "outcomes_sweagent.parquet")
     out: dict[str, dict[str, Cell]] = collections.defaultdict(lambda: collections.defaultdict(Cell))
@@ -263,6 +242,16 @@ def _sweep_cells(pool: str) -> dict[str, dict[str, float]]:
       and EITHER graded (float in [0,1]) OR f2p_passed/f2p_total/p2p_passed/p2p_total.
     graded = |(F2P u P2P) n passed| / |F2P u P2P|, i.e. the fraction of curated tests that
     pass -- boolean `resolved` is recoverable as (all F2P and all P2P pass).
+
+    Args:
+        pool: The pool name being loaded, used only for the error message.
+
+    Returns:
+        Arm id -> task id -> graded score.
+
+    Raises:
+        RuntimeError: If `EPISODE_DIR` has no episode files, since these pools have no
+            free labels and must not silently produce an empty matrix.
     """
     files = sorted(glob.glob(str(EPISODE_DIR / "*.json")))
     if not files:
@@ -288,6 +277,14 @@ def _sweep_cells(pool: str) -> dict[str, dict[str, float]]:
 
 # ------------------------------------------------------------------ swe_rebench: assembly
 def _v2_fields(t: pa.Table) -> tuple[dict, dict, dict, dict]:
+    """Extract per-instance text/group/difficulty/log-parser fields from the V2 table.
+
+    Args:
+        t: The SWE-rebench-V2 table, as returned by `_v2_table()`.
+
+    Returns:
+        A (text, group, difficulty, log_parser) tuple of instance_id-keyed dicts.
+    """
     ids = t.column("instance_id").to_pylist()
     text = dict(zip(ids, t.column("problem_statement").to_pylist()))
     group = dict(zip(ids, t.column("repo").to_pylist()))
@@ -300,6 +297,14 @@ def _v2_fields(t: pa.Table) -> tuple[dict, dict, dict, dict]:
 
 
 def _v1_fields(t: pa.Table) -> tuple[dict, dict, dict]:
+    """Extract per-instance text/group/difficulty fields from a SWE-rebench v1 table.
+
+    Args:
+        t: A v1-shaped table (v1 defs or the leaderboard pool).
+
+    Returns:
+        A (text, group, difficulty) tuple of instance_id-keyed dicts.
+    """
     ids = t.column("instance_id").to_pylist()
     text = dict(zip(ids, t.column("problem_statement").to_pylist()))
     group = dict(zip(ids, t.column("repo").to_pylist()))
@@ -314,10 +319,35 @@ def _v1_fields(t: pa.Table) -> tuple[dict, dict, dict]:
 
 
 def load_swe_rebench(pool: str = "free", min_arms: int = 2, min_rollouts: int = 1) -> dict:
-    """Build a router matrix. See the module docstring for the pool semantics.
+    """Build a router matrix from one SWE-rebench pool.
 
     score[i][j] is a FLOAT in [0,1] (pass rate over kept rollouts for `free`, graded
     test-pass fraction for a sweep) and float('nan') where the cell was never run.
+    `cost` is always None: no cost/token field exists in any of the five underlying
+    SWE-rebench datasets, and the public leaderboard only publishes per-model averages.
+
+    Args:
+        pool: Which pool to load:
+            "free" -- instances with >=`min_arms` free-label arms (this file's own
+                three SWE-agent arms plus the one OpenHands arm). Runs today, real
+                numbers; the three nebius task datasets otherwise carry ZERO model
+                outcomes on their own (verified, not assumed -- see `_pool_report`).
+            "v2_python" -- the 7,243 parse_log_pytest rows of SWE-rebench-V2 (sweep
+                target); has no free labels, so this reads our own sweep episodes.
+            "v2_all" -- all 32,079 V2 rows (30+ non-python log parsers); same as above.
+            "leaderboard" -- the 860-row post-cutoff pool (15 monthly splits, union ==
+                `test`); same as above.
+        min_arms: For `pool="free"`, minimum number of arms with a kept rollout for a
+            task to be included.
+        min_rollouts: For `pool="free"`, minimum kept rollouts for a cell to count.
+
+    Returns:
+        A dict with keys arms/tasks/score/cost/text/difficulty/group/rollouts/dropped/notes.
+
+    Raises:
+        ValueError: If `pool` is not one of the four supported pool names.
+        RuntimeError: If a sweep pool (`v2_python`/`v2_all`/`leaderboard`) has no
+            episodes under `results/episodes_swerebench/`.
     """
     if pool == "free":
         cells = {**_sweagent_cells(), **_openhands_cells()}
@@ -336,6 +366,9 @@ def load_swe_rebench(pool: str = "free", min_arms: int = 2, min_rollouts: int = 
         dropped = {a: {"infra": sum(c.infra for c in cells[a].values()),
                        "turn_or_ctx_limit_kept_as_model_failure":
                            sum(c.limit for c in cells[a].values())} for a in arms}
+        # MIXED SCAFFOLDS: swe-agent:* arms share one scaffold, openhands:model-unrecorded
+        # does not (and its model is UNVERIFIED) -- the clean routing sub-matrix is the
+        # three swe-agent arms. `cost` is None: no dataset here carries cost/tokens.
         notes = ("free labels; score = resolved rate over kept rollouts (GRADED). "
                  "MIXED SCAFFOLDS: swe-agent:* arms share one scaffold, "
                  "openhands:model-unrecorded does not and its model is UNVERIFIED. "
@@ -380,6 +413,13 @@ def load_swe_rebench(pool: str = "free", min_arms: int = 2, min_rollouts: int = 
 
 # ------------------------------------------------------------------ swe_rebench: summary
 def _pool_report() -> None:
+    """Print the V2/leaderboard column shapes, proving they carry no outcome labels.
+
+    The three nebius task datasets (V2, v1, leaderboard) are task-definition tables
+    only -- every column is a task field, so on their own they are a *sweep plan*,
+    not an outcome matrix. This prints the column list actually read, so that claim
+    is verified here rather than assumed.
+    """
     t = _v2_table()
     text, group, diff, parser = _v2_fields(t)
     print(f"V2 task pool: {t.num_rows:,} rows, {len(set(group.values())):,} repos, "
@@ -407,6 +447,7 @@ def _pool_report() -> None:
 
 
 def main_swe_rebench() -> None:
+    """CLI (`swe-rebench`): print the pool report, then the free-labels pool summary."""
     _pool_report()
     d = load_swe_rebench("free", min_arms=2)
     arms, tasks, score = d["arms"], d["tasks"], d["score"]
@@ -434,9 +475,13 @@ def main_swe_rebench() -> None:
 
 
 # --------------------------------------------------------------------------- deepswe constants
-TRIALS_URL = "https://deepswe.datacurve.ai/artifacts/v1.1/trials.json"
-DEEPSWE_TASKS_URL = "https://deepswe.datacurve.ai/artifacts/v1/tasks.json"
-LEADERBOARD_URL = "https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json"
+# Fetched on first call and cached under data/deepswe/. HF mirrors (datacurve/deep-swe,
+# datacurve/deep-swe-leaderboard) are gated, so these go straight to datacurve.ai instead.
+TRIALS_URL = "https://deepswe.datacurve.ai/artifacts/v1.1/trials.json"  # no auth, 37.3 MB
+DEEPSWE_TASKS_URL = "https://deepswe.datacurve.ai/artifacts/v1/tasks.json"  # no auth
+LEADERBOARD_URL = "https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json"  # cross-check
+# tasks.json carries only a one-line description, so the real agent prompt
+# (instruction.md) has to come from this tarball instead (Apache-2.0).
 TARBALL_URL = "https://codeload.github.com/datacurve-ai/deep-swe/tar.gz/refs/heads/main"
 
 # Every instruction.md ends with this harness boilerplate. It is identical on all 113 tasks and
@@ -450,6 +495,15 @@ METRICS = ("f2p", "partial", "passed", "reward")
 
 
 def _fetch_deepswe(url: str, name: str) -> pathlib.Path:
+    """Download `url` to `data/deepswe/<name>` if not already cached.
+
+    Args:
+        url: Source URL.
+        name: Cache filename under `DEEPSWE_CACHE`.
+
+    Returns:
+        The cached file's path.
+    """
     DEEPSWE_CACHE.mkdir(parents=True, exist_ok=True)
     dest = DEEPSWE_CACHE / name
     if not dest.exists() or dest.stat().st_size == 0:
@@ -460,7 +514,11 @@ def _fetch_deepswe(url: str, name: str) -> pathlib.Path:
 
 
 def _task_dir() -> pathlib.Path:
-    """Extract only instruction.md/task.toml/manifest.json from the 3.8 MB GitHub tarball."""
+    """Extract only instruction.md/task.toml/manifest.json from the 3.8 MB GitHub tarball.
+
+    Returns:
+        The directory containing one subdirectory per task id.
+    """
     out = DEEPSWE_CACHE / "deep-swe-main" / "tasks"
     if not out.is_dir() or not any(out.glob("*/instruction.md")):
         tar_path = _fetch_deepswe(TARBALL_URL, "deep-swe-main.tar.gz")
@@ -472,16 +530,39 @@ def _task_dir() -> pathlib.Path:
 
 
 def _prompt(task_id: str) -> str:
+    """Read one task's instruction.md, with the shared harness boilerplate stripped."""
     raw = (_task_dir() / task_id / "instruction.md").read_text()
     return raw[: -len(PROMPT_BOILERPLATE)] if raw.endswith(PROMPT_BOILERPLATE) else raw
 
 
 def load_deepswe(metric: str = "f2p") -> dict:
-    """Dense (arm x task) matrix from the published DeepSWE v1.1 per-trial table.
+    """Build a dense (arm x task) matrix from the published DeepSWE v1.1 per-trial table.
 
-    metric: "f2p" (graded fail-to-pass fraction, DEFAULT), "partial" (graded, p2p-diluted),
-            "passed"/"reward" (binary -- overstates the tier gap ~6x on this very data).
-    Cells with no scored trial are None in both `score` and `cost`, never 0.0.
+    The only SWE-shaped source found that already ships a dense outcome table, so this
+    gets routing supervision without spending a GPU-hour or an API dollar: 50 configs
+    (18 models x reasoning effort, all on ONE harness -- mini-swe-agent, so the arms are
+    comparable) x 113 long-horizon tasks, backed by 22,586 individual rollouts (~4/cell).
+
+    Rows with `included_in_score=False` (model_routing_404, provider_timeout,
+    verifier_timeout, ...) are MISSING DATA and are dropped -- 2 of 5,650 cells end up
+    empty (None, never 0.0). Rows the publisher deliberately scored as failures
+    (agent_timeout, context_window_exceeded) have `included_in_score=True` and are kept
+    as failures, since that is what reproduces the published leaderboard (`_crosscheck`).
+
+    Args:
+        metric: "f2p" (graded fail-to-pass fraction, DEFAULT, strictly intermediate on
+            41% of scored rows), "partial" (graded, diluted by the p2p regression
+            suite -- prefer f2p), or "passed"/"reward" (binary -- overstates the tier
+            gap ~6x on this very data).
+
+    Returns:
+        A dict with keys arms/tasks/score/cost/text/difficulty/group. Cells with no
+        scored trial are None in both `score` and `cost`, never 0.0.
+
+    Raises:
+        ValueError: If `metric` is not one of `METRICS`, if the fetched artifacts'
+            row counts disagree with their own declared headers, or if any trial
+            references a task id absent from tasks.json.
     """
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {METRICS}, got {metric!r}")
@@ -519,6 +600,8 @@ def load_deepswe(metric: str = "f2p") -> dict:
 
     # Derived difficulty: mean binary pass rate over all arms. Deliberately independent of
     # `metric` so the difficulty axis does not move when the score definition changes.
+    # There is NO explicit difficulty/rating field anywhere in this dataset (checked
+    # tasks.json, task.toml, manifest.json), so nothing here is an invented number.
     difficulty: dict[str, float] = {}
     for t in task_ids:
         p = [float(r["passed"]) for a in arms for r in cells.get((a, t), [])]
@@ -540,7 +623,14 @@ def load_deepswe(metric: str = "f2p") -> dict:
 
 
 def _crosscheck(arms: list[str]) -> str:
-    """Recompute pass@1 per arm from raw trials and diff against the published leaderboard."""
+    """Recompute pass@1 per arm from raw trials and diff against the published leaderboard.
+
+    Args:
+        arms: Arm ids to check.
+
+    Returns:
+        A human-readable summary of how many arms reproduce the published numbers.
+    """
     lb = json.loads(_fetch_deepswe(LEADERBOARD_URL, "leaderboard-live.json").read_text())
     published = {r["config"]: r["pass_at_1"] for r in lb["rows"]}
     rows = json.loads(_fetch_deepswe(TRIALS_URL, "trials.json").read_text())["rows"]
@@ -554,10 +644,17 @@ def _crosscheck(arms: list[str]) -> str:
 
 
 def _mean(row: list[float | None]) -> float:
+    """Average a row's non-None values."""
     return statistics.fmean(v for v in row if v is not None)
 
 
 def main_deepswe() -> None:
+    """CLI (`deepswe`): print the DeepSWE matrix summary, ladder, and routing headroom.
+
+    Worth loading over SWE-bench Verified because it is not saturated and every task
+    is routable: this recomputes the best single arm, the any-arm oracle, and the
+    all-arms/no-arms counts.
+    """
     d = load_deepswe()
     arms, task_ids, score, cost = d["arms"], d["tasks"], d["score"], d["cost"]
     n_a, n_t = len(arms), len(task_ids)

@@ -1,54 +1,6 @@
-"""Execution/eval harness: unified agent client + E2B sandbox exec + LiveCodeBench eval.
-
-The agent client and the sandbox/grading code live together here: grading and running
-untrusted model-generated code must never happen on this machine unreviewed, and the
-agent runner is what produces that code in the first place.
-
-======================================================================== llm
-Unified OpenAI + Anthropic agent client.
-
-The whole router experiment rests on one invariant: across every arm, the ONLY
-thing that differs is the model and its reasoning config. The scaffold, the tool
-set, the prompts, and the stopping rule are identical. This module is where that
-invariant is enforced, and where token usage is recorded exactly enough to price
-an episode.
-
-Two provider asymmetries are handled here rather than leaked to callers:
-  * Anthropic Messages API keeps history as content blocks and needs thinking
-    blocks echoed back unchanged; tool results go in a user turn.
-  * OpenAI Responses API keeps history as flat output items and needs
-    reasoning items preserved; tool results are function_call_output items.
-
-======================================================================== sandbox
-E2B sandbox execution + LiveCodeBench loader/grader for Docker-free agentic episodes.
-
-Why this exists: SWE-bench Pro is 7-17 min/episode behind amd64-only Docker, which is a
-useless inner loop. LiveCodeBench's AtCoder subset is pure stdin/stdout, needs no Docker,
-and still gives a real multi-turn agentic loop (write -> run public tests -> fix -> repeat),
-graded on held-out private tests. Grading of model-written code must never run on this
-machine unreviewed, so both the LiveCodeBench grader and the general-purpose sandbox runner
-live here together: one executes untrusted code inside E2B, the other supplies the problems
-and the (also untrusted-code-running) grading logic that gets shipped into that sandbox.
-
-E2B sandbox notes: the local runner used to execute unreviewed model-generated Python with
-the user's own permissions and saturated the machine (load 16.85/18 at 20 workers).
-LiveCodeBench's own harness says its `reliability_guard` "is NOT a security sandbox"; ours
-had no guard at all. Two patterns are lifted from
-`world-model-optimizer/wmh/harness/e2b_sandbox.py` rather than reinvented: sandboxes are
-tagged with `metadata` at create time so an orphan whose owning process died can be found and
-reaped via `Sandbox.list`, and capacity errors on create are retried with fixed backoff.
-Grading runs INSIDE the sandbox too. Grading executes the model's code, so doing it locally
-would defeat the whole point. Private tests are written only AFTER the agent has stopped, so
-the agent cannot read the answers it is about to be graded on.
-
-LiveCodeBench provenance notes that matter:
-  * private_test_cases are base64(zlib(pickle(json))). That is an UNPICKLE of data
-    downloaded from HF -- i.e. trust the repo or don't load it. We only unpickle,
-    never exec, and the payload is a JSON string.
-  * The official ERRATA lists items with multiple valid outputs, interactive protocols,
-    or wrong tests. Those are label noise for a router and are excluded by default.
-  * Difficulty is easy/medium/hard, and question_id joins 1:1 to real AtCoder IRT
-    ratings, so there is a continuous difficulty axis available if wanted.
+"""Execution/eval harness: unified OpenAI+Anthropic agent client, E2B sandbox exec, and
+the LiveCodeBench problem loader/grader. Sandbox exec and grading live alongside the
+agent client because both run untrusted, model-generated code and must stay together.
 """
 from __future__ import annotations
 
@@ -69,6 +21,7 @@ from typing import Any
 
 import anthropic
 import openai
+from pydantic import BaseModel, ConfigDict
 
 # Needed so `python router/harness.py` (run standalone, e.g. for its LiveCodeBench-loader
 # demo below) can resolve `router.router_core` even without the repo root pre-set on
@@ -82,6 +35,11 @@ DEFAULT_PATH = ROOT / "data" / "lcb_test6.jsonl"
 
 # ============================================================================ llm
 def load_env(path: pathlib.Path | None = None) -> None:
+    """Load KEY=VALUE lines from `.env.local` into `os.environ`, without overwriting.
+
+    Args:
+        path: Path to the env file; defaults to `.env.local` at the repo root.
+    """
     p = path or pathlib.Path(__file__).resolve().parent.parent / ".env.local"
     if not p.exists():
         return
@@ -91,8 +49,7 @@ def load_env(path: pathlib.Path | None = None) -> None:
             os.environ.setdefault(k.strip(), v.strip())
 
 
-@dataclasses.dataclass
-class Usage:
+class Usage(BaseModel):
     """Accumulated token usage. Reasoning/thinking bills as output on both providers."""
 
     inp: int = 0
@@ -103,24 +60,57 @@ class Usage:
     requests: int = 0
 
     def add(self, **kw: int) -> None:
+        """Accumulate token counts in place, treating a missing/None count as zero."""
         for k, v in kw.items():
             setattr(self, k, getattr(self, k) + (v or 0))
 
     def cost(self, arm: Arm, *, intro: bool = False) -> float:
+        """Price this accumulated usage under `arm`'s rates.
+
+        Args:
+            arm: The arm whose price table row to use.
+            intro: If True, price at the introductory rate where one exists.
+
+        Returns:
+            The USD cost of all usage accumulated so far.
+        """
         return arm.cost(inp=self.inp, cache_read=self.cache_read,
                         cache_write=self.cache_write, out=self.out, intro=intro)
 
 
-@dataclasses.dataclass
-class Tool:
+class Tool(BaseModel):
+    """One agent tool: name, description, JSON schema, and the function that runs it."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: str
     description: str
-    schema: dict
+    schema: dict  # arbitrary per-tool JSON schema -- shape genuinely varies per tool
     run: Callable[[dict], str]
 
 
-@dataclasses.dataclass
-class EpisodeResult:
+class ToolCallRecord(BaseModel):
+    """One tool call captured in a transcript turn."""
+
+    name: str
+    # Anthropic content blocks give already-parsed args (dict); OpenAI's function_call
+    # items give the raw JSON-encoded arguments string, parsed separately just before
+    # the tool actually runs. Recorded as received, so this stays a union of both.
+    input: dict[str, Any] | str
+
+
+class TranscriptEntry(BaseModel):
+    """One agent turn: assistant text plus any tool calls made and their results."""
+
+    turn: int
+    text: str
+    calls: list[ToolCallRecord]
+    results: list[str] | None = None
+
+
+class EpisodeResult(BaseModel):
+    """The outcome of one completed agent episode."""
+
     arm_id: str
     turns: int
     usage: Usage
@@ -128,11 +118,16 @@ class EpisodeResult:
     wall_s: float
     stop: str            # end_turn | max_turns | max_tokens | error | refusal
     error: str | None
-    transcript: list[dict]
+    transcript: list[TranscriptEntry]
 
 
 class AgentRunner:
-    """Runs one tool-calling episode to completion under a single arm."""
+    """Runs one tool-calling episode to completion under a single arm.
+
+    The scaffold, tool set, prompts, and stopping rule are identical across every arm;
+    only the model and its reasoning config (`Arm`) differ -- that invariant is what
+    makes cross-arm comparisons in this project meaningful, and it is enforced here.
+    """
 
     # Reasoning/thinking tokens are billed as output AND count against max_tokens. If they
     # exhaust the cap the model spends turn 1 reasoning, never emits a tool call, and the
@@ -153,6 +148,18 @@ class AgentRunner:
 
     def __init__(self, arm: Arm, tools: list[Tool], system: str,
                  max_turns: int = 60, max_tokens: int = 64_000, timeout_s: float = 900.0):
+        """Configure one episode runner for a single arm.
+
+        Args:
+            arm: The routing arm (provider, model, reasoning config) to run under.
+            tools: The tools available to the agent this episode.
+            system: The system prompt.
+            max_turns: Maximum number of agent turns before giving up.
+            max_tokens: Requested max output tokens per turn; raised to at least
+                `MIN_MAX_TOKENS` (and 2x any Anthropic thinking budget) so reasoning
+                depth never decides the outcome -- see MIN_MAX_TOKENS above.
+            timeout_s: Per-request HTTP timeout, in seconds.
+        """
         load_env()
         self.arm, self.tools, self.system = arm, tools, system
         self.max_turns = max_turns
@@ -166,11 +173,21 @@ class AgentRunner:
 
     # ---------------------------------------------------------------- anthropic
     def _tools_anthropic(self) -> list[dict]:
+        """Build the Anthropic-shaped tool list from `self.tools`."""
         return [{"name": t.name, "description": t.description, "input_schema": t.schema}
                 for t in self.tools]
 
     def _run_anthropic(self, task: str) -> EpisodeResult:
-        u, transcript = Usage(), []
+        """Run one episode against the Anthropic Messages API.
+
+        Args:
+            task: The task prompt, sent as the initial user turn.
+
+        Returns:
+            The completed episode's usage, cost, transcript, and stop reason.
+        """
+        u: Usage = Usage()
+        transcript: list[TranscriptEntry] = []
         messages: list[dict] = [{"role": "user", "content": task}]
         # Cache the system prompt + tool list: the prefix is identical every turn,
         # and Anthropic cache reads do not count against ITPM.
@@ -200,11 +217,12 @@ class AgentRunner:
             # Echo assistant content back verbatim — thinking blocks must not be edited.
             messages.append({"role": "assistant", "content": r.content})
             calls = [b for b in r.content if b.type == "tool_use"]
-            transcript.append({
-                "turn": turns,
-                "text": " ".join(b.text for b in r.content if b.type == "text")[:4000],
-                "calls": [{"name": b.name, "input": b.input} for b in calls],
-            })
+            entry = TranscriptEntry(
+                turn=turns,
+                text=" ".join(b.text for b in r.content if b.type == "text")[:4000],
+                calls=[ToolCallRecord(name=b.name, input=b.input) for b in calls],
+            )
+            transcript.append(entry)
             if not calls:
                 stop = "max_tokens" if r.stop_reason == "max_tokens" else "end_turn"
                 break
@@ -219,22 +237,35 @@ class AgentRunner:
                         out, is_err = tool.run(b.input), False
                     except Exception as e:  # noqa: BLE001
                         out, is_err = f"{type(e).__name__}: {e}", True
-                transcript[-1].setdefault("results", []).append(out[:2000])
+                if entry.results is None:
+                    entry.results = []
+                entry.results.append(out[:2000])
                 results.append({"type": "tool_result", "tool_use_id": b.id,
                                 "content": out[:30000], "is_error": is_err})
             # All results for one assistant turn go back in a SINGLE user message,
             # otherwise the model learns to stop making parallel calls.
             messages.append({"role": "user", "content": results})
 
-        return EpisodeResult(self.arm.id, turns, u, u.cost(self.arm), 0.0, stop, err, transcript)
+        return EpisodeResult(arm_id=self.arm.id, turns=turns, usage=u, cost_usd=u.cost(self.arm),
+                             wall_s=0.0, stop=stop, error=err, transcript=transcript)
 
     # ------------------------------------------------------------------ openai
     def _tools_openai(self) -> list[dict]:
+        """Build the OpenAI Responses-shaped tool list from `self.tools`."""
         return [{"type": "function", "name": t.name, "description": t.description,
                  "parameters": t.schema} for t in self.tools]
 
     def _run_openai(self, task: str) -> EpisodeResult:
-        u, transcript = Usage(), []
+        """Run one episode against the OpenAI Responses API.
+
+        Args:
+            task: The task prompt, sent as the initial user turn.
+
+        Returns:
+            The completed episode's usage, cost, transcript, and stop reason.
+        """
+        u: Usage = Usage()
+        transcript: list[TranscriptEntry] = []
         history: list[Any] = [{"role": "user", "content": task}]
         stop, err, turns = "max_turns", None, 0
 
@@ -259,11 +290,12 @@ class AgentRunner:
             # Preserve reasoning items verbatim; dropping them breaks the next turn.
             history += [item.model_dump(exclude_none=True) for item in r.output]
             calls = [o for o in r.output if getattr(o, "type", "") == "function_call"]
-            transcript.append({
-                "turn": turns,
-                "text": (r.output_text or "")[:4000],
-                "calls": [{"name": c.name, "input": c.arguments} for c in calls],
-            })
+            entry = TranscriptEntry(
+                turn=turns,
+                text=(r.output_text or "")[:4000],
+                calls=[ToolCallRecord(name=c.name, input=c.arguments) for c in calls],
+            )
+            transcript.append(entry)
             if not calls:
                 stop = "max_tokens" if r.status == "incomplete" else "end_turn"
                 break
@@ -281,14 +313,25 @@ class AgentRunner:
                         out = tool.run(args)
                     except Exception as e:  # noqa: BLE001
                         out = f"{type(e).__name__}: {e}"
-                transcript[-1].setdefault("results", []).append(out[:2000])
+                if entry.results is None:
+                    entry.results = []
+                entry.results.append(out[:2000])
                 history.append({"type": "function_call_output", "call_id": c.call_id,
                                 "output": out[:30000]})
 
-        return EpisodeResult(self.arm.id, turns, u, u.cost(self.arm), 0.0, stop, err, transcript)
+        return EpisodeResult(arm_id=self.arm.id, turns=turns, usage=u, cost_usd=u.cost(self.arm),
+                             wall_s=0.0, stop=stop, error=err, transcript=transcript)
 
     # ------------------------------------------------------------------ public
     def run(self, task: str) -> EpisodeResult:
+        """Run one episode end to end, dispatching to the arm's provider.
+
+        Args:
+            task: The task prompt.
+
+        Returns:
+            The completed episode, with `wall_s` set to the measured wall-clock time.
+        """
         t0 = time.time()
         res = (self._run_anthropic(task) if self.arm.provider == "anthropic"
                else self._run_openai(task))
@@ -298,6 +341,10 @@ class AgentRunner:
 
 # ============================================================================ sandbox
 # ---------------------------------------------------------------- E2B sandbox execution
+# Why E2B, not local exec: running unreviewed model-generated code locally, with the
+# caller's own permissions, previously saturated the machine (measured load 16.85/18 at
+# 20 workers), and LiveCodeBench's own harness says its `reliability_guard` "is NOT a
+# security sandbox" -- ours had none at all before this.
 
 # The account cap is 1100 concurrent sandboxes (WMH_E2B_SANDBOX_CAP). Stay well under it:
 # this lane must never starve another run, and orphaned sandboxes have previously blocked
@@ -311,6 +358,14 @@ _sem_lock = threading.Lock()
 
 
 def semaphore(limit: int = DEFAULT_MAX_CONCURRENT) -> threading.Semaphore:
+    """Get the process-wide sandbox concurrency semaphore, creating it on first use.
+
+    Args:
+        limit: Concurrency limit used only the first time this is called.
+
+    Returns:
+        The shared semaphore.
+    """
     global _sem
     with _sem_lock:
         if _sem is None:
@@ -319,7 +374,18 @@ def semaphore(limit: int = DEFAULT_MAX_CONCURRENT) -> threading.Semaphore:
 
 
 def create_sandbox(metadata: dict[str, str]) -> Any:
-    """Open one sandbox, retrying capacity errors. Metadata makes orphans reapable."""
+    """Open one E2B sandbox, retrying capacity errors with fixed backoff.
+
+    Args:
+        metadata: Tags attached at create time so an orphaned sandbox (owning
+            process died) can still be found and reaped via `Sandbox.list`.
+
+    Returns:
+        The created `e2b.Sandbox`.
+
+    Raises:
+        RuntimeError: If `$E2B_API_KEY` is unset, or every retry attempt fails.
+    """
     from e2b import Sandbox
 
     key = os.environ.get("E2B_API_KEY")
@@ -362,11 +428,22 @@ class SandboxSession:
     """One sandbox for one episode. Always kills itself, even on error."""
 
     def __init__(self, tag: dict[str, str], limit: int = DEFAULT_MAX_CONCURRENT):
+        """Configure a session; the sandbox itself opens in `__enter__`.
+
+        Args:
+            tag: Metadata tags for the underlying sandbox (see `create_sandbox`).
+            limit: Concurrency limit to acquire against.
+        """
         self.tag, self.limit = tag, limit
         self.sb: Any = None
         self._held = False
 
     def __enter__(self) -> SandboxSession:
+        """Acquire a concurrency slot and open the sandbox.
+
+        Returns:
+            This session, ready for `write`/`run`/`read`/`grade`.
+        """
         semaphore(self.limit).acquire()
         self._held = True
         try:
@@ -378,6 +455,7 @@ class SandboxSession:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """Kill the sandbox and release the concurrency slot, unconditionally."""
         try:
             if self.sb is not None:
                 self.sb.kill()  # never leak: orphans starve later runs
@@ -389,22 +467,40 @@ class SandboxSession:
                 self._held = False
 
     def write(self, path: str, data: str) -> None:
+        """Write `data` to `path` inside the sandbox."""
         self.sb.files.write(path, data)
 
     def run(self, cmd: str, timeout: float = 90.0) -> tuple[int, str, str]:
+        """Run `cmd` inside the sandbox.
+
+        Args:
+            cmd: Shell command to execute.
+            timeout: Maximum seconds to wait for completion.
+
+        Returns:
+            A (exit_code, stdout, stderr) tuple.
+        """
         r = self.sb.commands.run(cmd, timeout=timeout)
         code = getattr(r, "exit_code", None)
         return (0 if code is None else int(code),
                 getattr(r, "stdout", "") or "", getattr(r, "stderr", "") or "")
 
     def read(self, path: str) -> str:
+        """Read `path` from the sandbox, returning "" if it does not exist."""
         try:
             return self.sb.files.read(path)
         except Exception:  # noqa: BLE001 — a missing file is a real outcome, not an error
             return ""
 
     def grade(self, private_tests: list[dict]) -> tuple[int, int]:
-        """Write private tests only now, so the agent never saw them, then grade in-sandbox."""
+        """Write private tests only now, so the agent never saw them, then grade in-sandbox.
+
+        Args:
+            private_tests: Held-out test cases, written to the sandbox for the first time.
+
+        Returns:
+            A (passed, total) pair.
+        """
         self.write("private_tests.json", json.dumps(private_tests))
         self.write("grade.py", GRADER)
         _, out, _ = self.run("python3 grade.py", timeout=300.0)
@@ -416,6 +512,10 @@ class SandboxSession:
 
 
 # ---------------------------------------------------------------- LiveCodeBench loader
+# Why LiveCodeBench, not SWE-bench Pro: SWE-bench Pro measured 7-17 min/episode behind
+# amd64-only Docker, a useless inner loop. LiveCodeBench's AtCoder subset is pure
+# stdin/stdout, needs no Docker, and still gives a real multi-turn agentic loop (write ->
+# run public tests -> fix -> repeat), graded on held-out private tests.
 
 # github.com/LiveCodeBench/LiveCodeBench/blob/main/ERRATA.md -- multiple-solutions,
 # interactive, and erroneous-test items. Excluding these removes known label noise.
@@ -430,9 +530,11 @@ ERRATA = {
 
 @dataclasses.dataclass
 class Problem:
+    """One LiveCodeBench problem: statement plus public/private stdin-stdout test cases."""
+
     qid: str
     platform: str
-    difficulty: str
+    difficulty: str  # easy|medium|hard; question_id joins 1:1 to real AtCoder IRT ratings
     title: str
     statement: str
     public_tests: list[dict]
@@ -440,10 +542,24 @@ class Problem:
 
     @property
     def n_tests(self) -> int:
+        """Number of private (held-out) test cases for this problem."""
         return len(self.private_tests)
 
 
 def _decode_tests(raw) -> list[dict]:
+    """Decode one problem's test cases from either a JSON list or a packed blob.
+
+    LiveCodeBench's private_test_cases ship as base64(zlib(pickle(json))) -- an
+    UNPICKLE of data downloaded from HF, so this trusts the repo or doesn't load it.
+    Only unpickling happens here, never exec; the unpickled payload is itself a JSON
+    string, which is parsed, not executed.
+
+    Args:
+        raw: Either an already-decoded list of test-case dicts, or the packed blob.
+
+    Returns:
+        The list of test-case dicts.
+    """
     if isinstance(raw, list):
         return raw
     if not raw:
@@ -456,7 +572,17 @@ def _decode_tests(raw) -> list[dict]:
 
 def load(path: pathlib.Path = DEFAULT_PATH, *, platform: str = "atcoder",
          drop_errata: bool = True) -> list[Problem]:
-    """Load stdin/stdout problems. Defaults to AtCoder: no starter_code, no func_name."""
+    """Load stdin/stdout problems. Defaults to AtCoder: no starter_code, no func_name.
+
+    Args:
+        path: Path to the LiveCodeBench jsonl file.
+        platform: If set, keep only problems from this platform.
+        drop_errata: If True, drop problems listed in `ERRATA` as known label noise.
+
+    Returns:
+        The loaded problems, restricted to pure stdin/stdout items (this harness
+        only drives stdin/stdout; functional items would need a call driver).
+    """
     out: list[Problem] = []
     with path.open() as fh:
         for line in fh:
@@ -479,7 +605,17 @@ def load(path: pathlib.Path = DEFAULT_PATH, *, platform: str = "atcoder",
 
 def grade(code: str, tests: list[dict], *, timeout: float = 6.0,
           max_fail_report: int = 2) -> tuple[int, int, list[str]]:
-    """Run `code` against tests via stdin. Returns (passed, total, failure snippets)."""
+    """Run `code` against `tests` via stdin, outside any sandbox.
+
+    Args:
+        code: Python source to execute as a script.
+        tests: Test cases with "input"/"output" keys.
+        timeout: Per-test-case timeout, in seconds.
+        max_fail_report: Maximum number of failure snippets to collect.
+
+    Returns:
+        A (passed, total, failure_snippets) tuple.
+    """
     passed, fails = 0, []
     for t in tests:
         try:
@@ -530,6 +666,14 @@ print(f"\\n{len(tests)-bad}/{len(tests)} public tests passed")
 
 
 def make_workdir(p: Problem) -> pathlib.Path:
+    """Create a scratch directory with `p`'s public tests and the checker script.
+
+    Args:
+        p: The problem to prepare a workdir for.
+
+    Returns:
+        The created temporary directory's path.
+    """
     d = pathlib.Path(tempfile.mkdtemp(prefix=f"lcb-{p.qid}-"))
     (d / "public_tests.json").write_text(json.dumps(p.public_tests))
     (d / "check.py").write_text(CHECKER)
@@ -537,6 +681,7 @@ def make_workdir(p: Problem) -> pathlib.Path:
 
 
 def task_prompt(p: Problem) -> str:
+    """Render the agent-facing task prompt for problem `p`, including sample I/O."""
     ex = "\n\n".join(f"Sample input:\n{t['input']}\nSample output:\n{t['output']}"
                      for t in p.public_tests[:2])
     return (f"# {p.title}\n\n{p.statement}\n\n{ex}\n\n"

@@ -30,22 +30,15 @@ from router.harness import load_env  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # ============================================================ race-deepswe
-"""Race routing policies on DeepSWE v1.1 -- the first non-saturated set we have.
-
-Differences from the LiveCodeBench race, all deliberate:
-  * GRADED score is the objective, not binary. A policy's payoff on a task is the best
-    graded score among the arms it actually invoked; cost is the sum of those arms.
-  * Repo-GROUPED CV (91 repos over 113 tasks), because tasks from one repo share code and
-    a random split would leak neighbours into train.
-  * A COLLAPSE diagnostic is reported beside accuracy: what share of traffic a policy sends
-    to the priciest arm, versus what the oracle sends there. A router that has silently
-    degenerated into "always escalate" looks fine on accuracy and is useless.
-"""
-
 DEEPSWE_EMB = ROOT / "results" / "deepswe_embeddings.json"
 
 
 def build() -> route.Matrix:
+    """Build the full 50-arm DeepSWE matrix, dropping tasks with any missing cell.
+
+    Returns:
+        The (arm x task) matrix. `resolved` is graded score >= 1.0 (exact solve).
+    """
     d = datasets.load_deepswe()
     g = np.array(d["score"], dtype=float)
     c = np.array(d["cost"], dtype=float)
@@ -70,6 +63,16 @@ def build() -> route.Matrix:
 
 def embed(m: route.Matrix, text: dict[str, str], *, cache_path: pathlib.Path | None = None,
           embed_model: str = "text-embedding-3-large", base_url: str | None = None) -> None:
+    """Embed problem statements with the given model, cached on disk.
+
+    Args:
+        m: The matrix to attach embeddings to; mutates `m.emb` in place.
+        text: Task id -> statement text, for ids in `m.qids` missing from cache.
+        cache_path: Where to cache embeddings; defaults to `DEEPSWE_EMB`.
+        embed_model: Embedding model name.
+        base_url: If set, use this OpenAI-compatible base URL instead of OpenAI's
+            (e.g. a local embedding server); auth is skipped in that case.
+    """
     cache_path = cache_path or DEEPSWE_EMB
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     todo = [q for q in m.qids if q not in cache]
@@ -87,7 +90,23 @@ def embed(m: route.Matrix, text: dict[str, str], *, cache_path: pathlib.Path | N
 
 
 def deepswe_run(m: route.Matrix, policy, folds, pricey: int):
-    """Graded payoff + cost + share routed to the priciest arm, all out-of-fold."""
+    """Run a policy under repo-grouped CV, tracking graded payoff, cost, and pricey-arm share.
+
+    GRADED score (not binary resolve) is the objective: a policy's payoff on a task
+    is the best graded score among the arms it actually invoked, and cost is the sum
+    of those arms' costs. `hit` (share routed to the priciest arm) is a collapse
+    diagnostic -- a policy that has silently degenerated into "always escalate" looks
+    fine on accuracy alone and is useless.
+
+    Args:
+        m: The matrix to evaluate on.
+        policy: A callable of `(matrix, train_indices, test_index) -> Plan`.
+        folds: Problem-index groups from `route.grouped_folds`.
+        pricey: Index of the priciest arm, for the collapse diagnostic.
+
+    Returns:
+        Per-task `(graded_payoff, cost, hit_pricey_arm)` arrays, all out-of-fold.
+    """
     gr = np.zeros(m.n)
     co = np.zeros(m.n)
     hit = np.zeros(m.n, dtype=bool)
@@ -107,6 +126,11 @@ def deepswe_run(m: route.Matrix, policy, folds, pricey: int):
 
 
 def cmd_race_deepswe() -> None:
+    """CLI (`race-deepswe`): race routing policies on DeepSWE v1.1 under repo-grouped CV.
+
+    Repo-grouped CV (91 repos over 113 tasks) is used because tasks from one repo
+    share code, so a random split would leak neighbours into train.
+    """
     load_env()
     m = build()
     d = datasets.load_deepswe()
@@ -185,22 +209,18 @@ def cmd_race_deepswe() -> None:
 
 
 # ============================================================ holdout-deepswe
-"""Clean 80/20 repo split on DeepSWE: no CV on the 80, holdout touched once.
-
-Design, deliberately simple so the provenance is legible:
-  1. Split the 88 repos 80/20. Tasks follow their repo, so no repo spans both sides.
-  2. Inside the 80 ONLY, a single train/val split picks (k, tau). The holdout never
-     informs the hyperparameters -- that is the leak nested CV could not fully rule out.
-  3. Evaluate once on the 20. Report a repo-clustered bootstrap CI.
-
-Also reports across several split seeds, because a single 80/20 at n~22 can be lucky and
-the spread across seeds is the honest picture of how much one split can be trusted.
-"""
+# Clean 80/20 repo split on DeepSWE: split the 88 repos 80/20 (tasks follow their repo,
+# so none spans both sides); inside the 80 ONLY, one train/val split picks (k, tau) --
+# the holdout never informs the hyperparameters, which is the leak nested CV could not
+# fully rule out; then evaluate once on the untouched 20 with a repo-clustered bootstrap
+# CI. Repeated across several split seeds, since a single 80/20 at n~22 can be lucky and
+# the spread across seeds is the honest picture of how much one split can be trusted.
 
 GRID_HOLDOUT = [(k, t) for k in (6, 12, 20) for t in (0.3, 0.5, 0.7, 0.9)]
 
 
 def sub_holdout(m: route.Matrix, idx: np.ndarray) -> route.Matrix:
+    """Slice a matrix down to task indices `idx`, keeping all arms."""
     return route.Matrix(arms=m.arms, qids=[m.qids[j] for j in idx],
                         resolved=m.resolved[:, idx], graded=m.graded[:, idx],
                         cost=m.cost[:, idx], difficulty=[m.difficulty[j] for j in idx],
@@ -208,6 +228,16 @@ def sub_holdout(m: route.Matrix, idx: np.ndarray) -> route.Matrix:
 
 
 def split_by_repo_holdout(m: route.Matrix, frac: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Split tasks into train/test by repo, so no repo spans both sides.
+
+    Args:
+        m: The matrix whose `group` (repo) labels define the split.
+        frac: Fraction of repos assigned to train.
+        seed: Shuffle seed, for reproducibility.
+
+    Returns:
+        A (train_indices, test_indices) pair, over task indices.
+    """
     repos = sorted(set(m.group))
     random.Random(seed).shuffle(repos)
     n_tr = int(round(len(repos) * frac))
@@ -218,6 +248,11 @@ def split_by_repo_holdout(m: route.Matrix, frac: float, seed: int) -> tuple[np.n
 
 
 def cmd_holdout_deepswe() -> None:
+    """CLI (`holdout-deepswe`): clean 80/20 repo-split holdout on the 41-arm DeepSWE pool.
+
+    See the module-section comment above for the split/hyperparameter-selection design.
+    Reported across 6 split seeds so the spread (not just one lucky split) is visible.
+    """
     load_env()
     full = build()
     d = datasets.load_deepswe()
@@ -246,10 +281,13 @@ def cmd_holdout_deepswe() -> None:
             g = c = 0.0
             for j in range(V.n):
                 plan = route.p_knn_threshold(k, t)(
-                    route.Matrix(A.arms, A.qids + [V.qids[j]], np.c_[A.resolved, V.resolved[:, j]],
-                                 np.c_[A.graded, V.graded[:, j]], np.c_[A.cost, V.cost[:, j]],
-                                 A.difficulty + [V.difficulty[j]], A.group + [V.group[j]],
-                                 np.vstack([A.emb, V.emb[j]])),
+                    route.Matrix(arms=A.arms, qids=A.qids + [V.qids[j]],
+                                 resolved=np.c_[A.resolved, V.resolved[:, j]],
+                                 graded=np.c_[A.graded, V.graded[:, j]],
+                                 cost=np.c_[A.cost, V.cost[:, j]],
+                                 difficulty=A.difficulty + [V.difficulty[j]],
+                                 group=A.group + [V.group[j]],
+                                 emb=np.vstack([A.emb, V.emb[j]])),
                     np.arange(A.n), A.n)
                 i = plan[0]
                 g += V.graded[i, j]
@@ -265,12 +303,13 @@ def cmd_holdout_deepswe() -> None:
         bg = np.zeros(TE.n)
         bc = np.zeros(TE.n)
         for j in range(TE.n):
-            merged = route.Matrix(TR.arms, TR.qids + [TE.qids[j]],
-                                  np.c_[TR.resolved, TE.resolved[:, j]],
-                                  np.c_[TR.graded, TE.graded[:, j]],
-                                  np.c_[TR.cost, TE.cost[:, j]],
-                                  TR.difficulty + [TE.difficulty[j]],
-                                  TR.group + [TE.group[j]], np.vstack([TR.emb, TE.emb[j]]))
+            merged = route.Matrix(arms=TR.arms, qids=TR.qids + [TE.qids[j]],
+                                  resolved=np.c_[TR.resolved, TE.resolved[:, j]],
+                                  graded=np.c_[TR.graded, TE.graded[:, j]],
+                                  cost=np.c_[TR.cost, TE.cost[:, j]],
+                                  difficulty=TR.difficulty + [TE.difficulty[j]],
+                                  group=TR.group + [TE.group[j]],
+                                  emb=np.vstack([TR.emb, TE.emb[j]]))
             i = route.p_knn_threshold(k, t)(merged, np.arange(TR.n), TR.n)[0]
             gr[j], co[j] = TE.graded[i, j], TE.cost[i, j]
             bg[j], bc[j] = TE.graded[gbest, j], TE.cost[gbest, j]
@@ -294,18 +333,11 @@ def cmd_holdout_deepswe() -> None:
 
 
 # ============================================================ exp1-holdout9
-"""EXP 1 -- headline result: 9-arm pool, DeepSWE 80/20 clean repo split, 3 seeds.
-
-The 9 arms are the pruned frontier from the 41-arm race (the router selected only 13 of 41,
-and dropping the dominated ones improved the ratio), plus claude-fable-5@xhigh, which DeepSWE
-marks dominated but which leads coding elsewhere -- kept so a single benchmark does not get to
-decide the pool permanently.
-
-Split is by REPO, so no repo appears on both sides. (k, tau) are chosen inside the 80 via one
-internal repo split, never touching the holdout. Reported per seed AND aggregated, because a
-single 20% holdout at ~22 tasks is not trustworthy alone -- the 41-arm version of this ranged
-0.90x to 5.25x across seeds, and that spread is the honest error bar.
-"""
+# EXP 1 -- headline result: 9-arm pool, DeepSWE 80/20 clean repo split, 3 seeds. The 9
+# arms are the pruned frontier from the 41-arm race (the router selected only 13 of 41,
+# and dropping the dominated ones improved the ratio), plus claude-fable-5@xhigh, which
+# DeepSWE marks dominated but which leads coding elsewhere -- kept so a single benchmark
+# does not get to decide the pool permanently.
 
 NINE = ["gpt_5_6_terra_high", "gpt_5_6_luna_xhigh", "gpt_5_6_luna_max",
         "gpt_5_6_sol_medium", "gpt_5_6_sol_high", "claude_opus_5_low",
@@ -315,6 +347,7 @@ EXP1_SEEDS = (0, 1, 2)
 
 
 def sub_exp1(m, idx):
+    """Slice a matrix down to task indices `idx`, keeping all arms."""
     return route.Matrix(arms=m.arms, qids=[m.qids[j] for j in idx], resolved=m.resolved[:, idx],
                         graded=m.graded[:, idx], cost=m.cost[:, idx],
                         difficulty=[m.difficulty[j] for j in idx],
@@ -322,6 +355,7 @@ def sub_exp1(m, idx):
 
 
 def split_by_repo_exp1(m, frac, seed):
+    """Split tasks into train/test by repo, so no repo spans both sides."""
     repos = sorted(set(m.group))
     random.Random(seed).shuffle(repos)
     tr_r = set(repos[: int(round(len(repos) * frac))])
@@ -330,15 +364,37 @@ def split_by_repo_exp1(m, frac, seed):
 
 
 def one_task(TR, q_res, q_grd, q_cost, q_diff, q_grp, q_emb, k, tau):
-    """Route a single held-out task against the TR lookup table."""
-    merged = route.Matrix(TR.arms, TR.qids + ["_q"], np.c_[TR.resolved, q_res],
-                          np.c_[TR.graded, q_grd], np.c_[TR.cost, q_cost],
-                          TR.difficulty + [q_diff], TR.group + [q_grp],
-                          np.vstack([TR.emb, q_emb]))
+    """Route a single held-out task against the TR lookup table.
+
+    Args:
+        TR: The training-fold matrix, used as the kNN lookup table.
+        q_res: The query task's per-arm resolved column.
+        q_grd: The query task's per-arm graded-score column.
+        q_cost: The query task's per-arm cost column.
+        q_diff: The query task's difficulty label.
+        q_grp: The query task's group (repo) label.
+        q_emb: The query task's embedding.
+        k: Number of nearest neighbours.
+        tau: Minimum predicted P(resolve) to pick an arm.
+
+    Returns:
+        The chosen arm's index.
+    """
+    merged = route.Matrix(arms=TR.arms, qids=TR.qids + ["_q"], resolved=np.c_[TR.resolved, q_res],
+                          graded=np.c_[TR.graded, q_grd], cost=np.c_[TR.cost, q_cost],
+                          difficulty=TR.difficulty + [q_diff], group=TR.group + [q_grp],
+                          emb=np.vstack([TR.emb, q_emb]))
     return route.p_knn_threshold(k, tau)(merged, np.arange(TR.n), TR.n)[0]
 
 
 def cmd_exp1_holdout9() -> None:
+    """CLI (`exp1-holdout9`): EXP1 headline result on the 9-arm pruned-frontier pool.
+
+    Split by repo; (k, tau) chosen inside the 80 only, never touching the holdout;
+    reported per seed and aggregated, since a single 20% holdout at ~22 tasks is not
+    trustworthy alone -- the 41-arm version of this ranged 0.90x to 5.25x across
+    seeds, and that spread is the honest error bar.
+    """
     load_env()
     full = build()
     d = datasets.load_deepswe()
@@ -412,14 +468,12 @@ def cmd_exp1_holdout9() -> None:
 
 
 # ============================================================ race-router
-"""Race every routing policy against the cascade under contest-grouped CV.
-
-Prints one table. The decision it settles: does any learned policy beat the plain cascade at
-matched accuracy? If not, ship the cascade.
-"""
-
-
 def cmd_race_router() -> None:
+    """CLI (`race-router`): race every routing policy against the cascade on LiveCodeBench.
+
+    Prints one table under contest-grouped CV. The decision it settles: does any
+    learned policy beat the plain cascade at matched accuracy? If not, ship the cascade.
+    """
     load_env()
     m = route.load_matrix()
     print(f"matrix: {len(m.arms)} arms x {m.n} problems, "
@@ -489,13 +543,6 @@ def cmd_race_router() -> None:
 
 
 # ============================================================ probe-arms
-"""Probe every candidate routing arm with a real tool-calling request.
-
-Cheap pre-flight: confirms each (model, effort) combo is accepted by the live API
-and can emit a tool call, before any budget is committed to the sweep.
-Writes results/arm_probe.json.
-"""
-
 # A prompt that should force exactly one tool call — verifies agentic capability.
 PROBE_TASK = ("Use the run_bash tool to list the Python files in the current directory. "
               "Call the tool, do not explain.")
@@ -524,6 +571,19 @@ OPENAI_ARMS = [(m, e) for m in OPENAI_MODELS for e in OPENAI_EFFORTS]
 
 
 def probe_anthropic(model: str, effort: str | None, thinking: str) -> dict:
+    """Send one probe request to the Anthropic Messages API and summarize the result.
+
+    Diagnostic dict, shape genuinely varies from `probe_openai`'s (different fields
+    per provider) -- see `probe_run`.
+
+    Args:
+        model: Anthropic model id.
+        effort: `output_config.effort` value, or None/empty to omit it.
+        thinking: "adaptive"|"budget"|"off" -- selects the `thinking` request block.
+
+    Returns:
+        A summary dict: ok, latency, stop reason, whether a tool was called, token usage.
+    """
     cl = anthropic.Anthropic(max_retries=1, timeout=180.0)
     kw: dict = {
         "model": model,
@@ -556,6 +616,15 @@ def probe_anthropic(model: str, effort: str | None, thinking: str) -> dict:
 
 
 def probe_openai(model: str, effort: str) -> dict:
+    """Send one probe request to the OpenAI Responses API and summarize the result.
+
+    Args:
+        model: OpenAI model id.
+        effort: `reasoning.effort` value.
+
+    Returns:
+        A summary dict: ok, latency, status, whether a tool was called, token usage.
+    """
     cl = openai.OpenAI(max_retries=1, timeout=180.0)
     t0 = time.time()
     r = cl.responses.create(
@@ -581,6 +650,15 @@ def probe_openai(model: str, effort: str) -> dict:
 
 
 def probe_run(job):
+    """Run one probe job (either provider), catching and recording any failure.
+
+    Args:
+        job: A (provider_kind, args) pair, where `provider_kind` is "anthropic" or
+            "openai" and `args` are positional args for the matching probe function.
+
+    Returns:
+        A (label, result_dict) pair; `result_dict["ok"]` is False on any exception.
+    """
     kind, args = job
     label = f"{kind}:{':'.join(str(a) for a in args)}"
     try:
@@ -591,6 +669,11 @@ def probe_run(job):
 
 
 def cmd_probe_arms() -> None:
+    """CLI (`probe-arms`): pre-flight probe every candidate (model, effort) arm.
+
+    Confirms each combo is accepted by the live API and can emit a tool call, before
+    any budget is committed to a sweep. Writes results/arm_probe.json.
+    """
     load_env()
     jobs = [("anthropic", a) for a in ANTHROPIC_ARMS] + [("openai", a) for a in OPENAI_ARMS]
     out: dict[str, dict] = {}

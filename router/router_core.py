@@ -1,53 +1,8 @@
 """The deployable router: price table, kNN inference, and the policies/race harness.
 
-Three layers that belong together:
-  * pricing  -- canonical price table and `Arm` (provider + model + reasoning config).
-  * predict  -- `Router`/`Decision`: load an exported artifact, route a task to an arm.
-  * route    -- `Matrix`, CV policies (cascade/kNN/oracle), and the stats used to prove
-                a learned router beats a plain FrugalGPT-style cascade.
-
-======================================================================== pricing
-Prices fetched live 2026-07-28 from:
-  OpenAI    https://developers.openai.com/api/docs/pricing (+ per-model pages)
-  Anthropic https://platform.claude.com/docs/en/about-claude/pricing
-USD per 1M tokens. Reasoning/thinking tokens bill as OUTPUT on both providers.
-
-Two deliberate conservatism choices, so the headline cost-saving claim cannot be
-accused of leaning on a temporary discount or an optimistic cache assumption:
-  * Sonnet 5's $2/$10 is INTRODUCTORY and expires 2026-08-31. `STANDARD` uses the
-    post-intro $3/$15. Use `INTRO` only to reconcile against a live invoice.
-  * Cache-write premiums are charged at the 5-minute rate (1.25x input).
-
-======================================================================== predict
-Standalone coding-task router. Load an exported artifact, get an arm back.
-
-Deliberately dependency-light so it can be dropped into another service: numpy plus
-whatever already calls the OpenAI embeddings endpoint. No sklearn, no torch, no repo imports.
-
-kNN has no fitted weights, so the "model" IS the lookup table: task embeddings, each arm's
-outcome on each of those tasks, and each arm's median cost. Routing embeds the incoming task,
-finds its nearest labelled neighbours, and picks the cheapest arm those neighbours say will
-probably solve it.
-
-SCOPE -- read before trusting a decision. Fit on 110 long-horizon SWE tasks from DeepSWE v1.1
-(median 61 agent steps, ~15 min/episode). Measured there at 2.15x cheaper than always using
-the strongest arm, with the accuracy delta's 95% CI containing zero. It has NOT been validated
-on short interactive tasks, on non-Python repos beyond DeepSWE's mix, or on any held-out
-benchmark. `route()` returns its own confidence and neighbour distance so a caller can refuse
-to trust an off-distribution decision rather than silently getting a bad arm.
-
-======================================================================== route
-The router: policies, and an honest race against the baselines that must be beaten.
-
-Decision rule this file exists to settle: a learned router is only worth shipping if it beats
-a plain FrugalGPT-style cascade at matched accuracy. On our measured LiveCodeBench matrix the
-cascade is at 1.81x and the parity oracle at 6.54x, so the cascade -- not the most expensive
-arm -- is the bar.
-
-Everything is evaluated under CONTEST-grouped cross-validation. Problems from one AtCoder
-contest (abc387_a, abc387_b, ...) share setters and style, so a random split leaks: neighbours
-from the same contest would sit in both train and test and flatter KNN. Grouping by contest
-removes that.
+Three layers: pricing (`Price`/`Arm`, the canonical price table), predict (`Router`/
+`Decision`: load an exported artifact and route a task to an arm), and route (`Matrix`
+plus the CV policies and stats used to compare a learned router against a cascade).
 """
 from __future__ import annotations
 
@@ -59,9 +14,10 @@ import math
 import pathlib
 import random
 import re
-from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 from tabulate import tabulate
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -74,15 +30,20 @@ EMBED_MODEL = "text-embedding-3-large"
 
 
 # ============================================================================ pricing
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Price:
+    """One model's price row. USD per 1M tokens; reasoning/thinking bills as output."""
+
     inp: float          # uncached input, $/1M
     cache_read: float   # cached input read, $/1M
     out: float          # output (incl. reasoning/thinking), $/1M
-    cache_write: float  # 5-min cache write, $/1M
+    cache_write: float  # 5-min cache write, $/1M -- 1.25x inp where a provider prices
+                         # the premium at all; equal to inp where it doesn't (see below)
 
 
-# provider -> model -> Price
+# provider -> model -> Price. Fetched live 2026-07-28 from OpenAI
+# (developers.openai.com/api/docs/pricing) and Anthropic
+# (platform.claude.com/docs/en/about-claude/pricing).
 STANDARD: dict[str, dict[str, Price]] = {
     "openai": {
         "gpt-5.4-nano":  Price(0.20, 0.02,  1.25, 0.20),
@@ -103,7 +64,8 @@ STANDARD: dict[str, dict[str, Price]] = {
     },
 }
 
-# Sonnet 5 introductory rate, active through 2026-08-31 only.
+# Sonnet 5 introductory rate, active through 2026-08-31 only; STANDARD above already
+# uses the post-intro $3/$15, so use this override only to reconcile a live invoice.
 INTRO_OVERRIDES = {("anthropic", "claude-sonnet-5"): Price(2.00, 0.20, 10.00, 2.50)}
 
 # Anthropic models that reject output_config.effort with HTTP 400 (measured).
@@ -113,9 +75,10 @@ OPENAI_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
-@dataclass(frozen=True)
-class Arm:
+class Arm(BaseModel):
     """One routing candidate: a model plus its reasoning configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     provider: str
     model: str
@@ -124,23 +87,44 @@ class Arm:
 
     @property
     def id(self) -> str:
+        """This arm's internal key: model name plus effort or thinking mode."""
         return f"{self.model}@{self.effort or self.thinking}"
 
     @property
     def price(self) -> Price:
+        """This arm's row in the standard price table."""
         return STANDARD[self.provider][self.model]
 
     def cost(self, *, inp: int = 0, cache_read: int = 0, cache_write: int = 0,
              out: int = 0, intro: bool = False) -> float:
-        """USD for one request's measured token usage."""
+        """Compute USD cost for one request's measured token usage.
+
+        Args:
+            inp: Uncached input tokens.
+            cache_read: Cached input tokens read.
+            cache_write: Input tokens written to cache (5-minute rate).
+            out: Output tokens, including reasoning/thinking.
+            intro: If True, price at the introductory rate where one exists.
+
+        Returns:
+            The USD cost of this token usage under this arm's price.
+        """
         p = INTRO_OVERRIDES.get((self.provider, self.model), self.price) if intro else self.price
         return (inp * p.inp + cache_read * p.cache_read
                 + cache_write * p.cache_write + out * p.out) / 1_000_000
 
-    def request_kwargs(self) -> dict:
-        """Provider-native params for this arm, honouring the measured constraints."""
+    def request_kwargs(self) -> dict[str, Any]:
+        """Build this arm's provider-native request kwargs.
+
+        Returns:
+            Keyword arguments ready to splat into the provider SDK call.
+
+        Raises:
+            AssertionError: If this arm's (model, effort) combination is known to be
+                rejected by the provider (e.g. output_config.effort on claude-haiku-4-5).
+        """
         if self.provider == "anthropic":
-            kw: dict = {"model": self.model}
+            kw: dict[str, Any] = {"model": self.model}
             if self.thinking == "adaptive":
                 kw["thinking"] = {"type": "adaptive"}
             elif self.thinking == "budget":
@@ -158,26 +142,33 @@ class Arm:
 
 
 def all_validated_arms() -> list[Arm]:
-    """The 47 arms confirmed live + tool-calling on 2026-07-28."""
+    """List the 47 arms confirmed live and tool-calling on 2026-07-28.
+
+    Returns:
+        Every routing candidate this router is allowed to pick from.
+    """
     arms = [
-        Arm("anthropic", "claude-haiku-4-5", None, "off"),
-        Arm("anthropic", "claude-haiku-4-5", None, "budget"),
+        Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="off"),
+        Arm(provider="anthropic", model="claude-haiku-4-5", effort=None, thinking="budget"),
     ]
     for m in ("claude-sonnet-5", "claude-opus-4-8"):
-        arms += [Arm("anthropic", m, e, "adaptive") for e in ANTHROPIC_EFFORTS]
-    arms += [Arm("anthropic", "claude-fable-5", e, "omit") for e in ANTHROPIC_EFFORTS]
+        arms += [Arm(provider="anthropic", model=m, effort=e, thinking="adaptive")
+                 for e in ANTHROPIC_EFFORTS]
+    arms += [Arm(provider="anthropic", model="claude-fable-5", effort=e, thinking="omit")
+             for e in ANTHROPIC_EFFORTS]
     for m in ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.3-codex", "gpt-5.6-sol"):
-        arms += [Arm("openai", m, e) for e in OPENAI_EFFORTS]
+        arms += [Arm(provider="openai", model=m, effort=e) for e in OPENAI_EFFORTS]
     return arms
 
 
 def cost_span() -> tuple[float, float]:
-    """(cheapest, priciest) blended $/1M at a 1:1 in:out mix, for sanity checks."""
+    """Return the (cheapest, priciest) blended $/1M price at a 1:1 in:out mix."""
     blended = [(p.inp + p.out) / 2 for prov in STANDARD.values() for p in prov.values()]
     return min(blended), max(blended)
 
 
 def main_pricing() -> None:
+    """CLI (`arms`): print the validated arm count, cost span, and per-episode cost ladder."""
     arms = all_validated_arms()
     lo, hi = cost_span()
     print(f"{len(arms)} validated arms | blended $/1M span: {lo:.2f} -> {hi:.2f} ({hi/lo:.0f}x)")
@@ -192,8 +183,21 @@ def main_pricing() -> None:
 
 
 # ============================================================================ predict
-@dataclasses.dataclass
-class Decision:
+class ArmSpec(BaseModel):
+    """One arm's resolved routing spec, as stored in an exported artifact's `arm_spec`."""
+
+    model: str
+    effort: str | None = None
+    provider: str
+    # Ready to splat into the provider SDK call. Shape genuinely varies by provider
+    # (openai: model+reasoning; anthropic: model+thinking+output_config) and is never
+    # inspected key-by-key downstream, only forwarded -- see Decision.request_kwargs.
+    request_kwargs: dict[str, Any]
+
+
+class Decision(BaseModel):
+    """One routing decision: the chosen arm, its predicted odds, and request kwargs."""
+
     model: str                  # provider model id, e.g. "gpt-5.6-sol"
     effort: str | None          # reasoning effort / thinking level
     arm_id: str                 # internal arm key
@@ -202,31 +206,54 @@ class Decision:
     nearest_sim: float          # cosine similarity to the closest labelled task
     off_distribution: bool      # True when no neighbour is close enough to trust
     fallback_used: bool         # True when no arm cleared the threshold
-    request_kwargs: dict        # ready to splat into the provider SDK call
+    # Provider-varying shape, same reasoning as ArmSpec.request_kwargs above.
+    request_kwargs: dict[str, Any]
 
-    def as_dict(self) -> dict:
-        return dataclasses.asdict(self)
+    def as_dict(self) -> dict[str, Any]:
+        """Return this decision as a plain dict, e.g. for JSON logging."""
+        return self.model_dump()
 
 
 class Router:
+    """kNN router: an exported lookup table of task embeddings, per-arm outcomes, and
+    per-arm median cost. `route()`/`route_embedding()` embed a task, find its nearest
+    labelled neighbours, and return the cheapest arm they predict will solve it.
+
+    Fit on 110 long-horizon SWE tasks from DeepSWE v1.1 (median 61 agent steps), where
+    nested CV measured it at 2.15x cheaper than always using the strongest arm, with the
+    accuracy delta's 95% CI containing zero. NOT validated on short interactive tasks,
+    non-Python repos beyond DeepSWE's mix, or any held-out benchmark -- always check
+    `Decision.off_distribution` before trusting a route outside that scope.
+    """
+
     def __init__(self, artifact_dir: str | pathlib.Path, *,
                 artifact_json: str = ARTIFACT_JSON, artifact_npz: str = ARTIFACT_NPZ,
                 providers: set[str] | None = None):
-        """`providers`, if given (e.g. {"openai"}), restricts the arm pool to just those
-        providers -- filtered once here so route_embedding()/route() need no changes and
-        can't pick a disallowed arm. Cheapest-first order and the fallback arm are both
-        recomputed within the restricted pool."""
+        """Load an exported router artifact.
+
+        Args:
+            artifact_dir: Directory containing the artifact's `.json`/`.npz` pair.
+            artifact_json: Filename of the metadata JSON within `artifact_dir`.
+            artifact_npz: Filename of the numpy archive within `artifact_dir`.
+            providers: If given (e.g. `{"openai"}`), restricts the arm pool to just
+                those providers -- filtered once here so `route_embedding()`/`route()`
+                need no changes and can't pick a disallowed arm. Cheapest-first order
+                and the fallback arm are both recomputed within the restricted pool.
+
+        Raises:
+            ValueError: If restricting to `providers` would leave no arms at all.
+        """
         p = pathlib.Path(artifact_dir)
         meta = json.loads((p / artifact_json).read_text())
         arr = np.load(p / artifact_npz)
         self.meta = meta
         arms: list[str] = meta["arms"]
-        arm_spec: dict = meta["arm_spec"]
+        arm_spec = {k: ArmSpec.model_validate(v) for k, v in meta["arm_spec"].items()}
         resolved: np.ndarray = arr["resolved"]  # (n_arms, n_tasks) bool
         med_cost: np.ndarray = arr["med_cost"]  # (n_arms,)
         fallback = int(meta["fallback_arm_index"])
         if providers is not None:
-            keep = [i for i, a in enumerate(arms) if arm_spec[a]["provider"] in providers]
+            keep = [i for i, a in enumerate(arms) if arm_spec[a].provider in providers]
             if not keep:
                 raise ValueError(f"no arms left after filtering to providers={providers}")
             arms = [arms[i] for i in keep]
@@ -234,7 +261,7 @@ class Router:
             med_cost = med_cost[keep]
             fallback = int(np.argmax(resolved.mean(axis=1)))
         self.arms = arms
-        self.arm_spec = arm_spec
+        self.arm_spec: dict[str, ArmSpec] = arm_spec
         self.k: int = meta["k"]
         self.tau: float = meta["tau"]
         self.sim_floor: float = meta["sim_floor"]
@@ -246,6 +273,14 @@ class Router:
 
     # ---------------------------------------------------------------- internals
     def _probs(self, v: np.ndarray) -> tuple[np.ndarray, float]:
+        """Compute each arm's weighted-neighbour P(resolve) for embedding `v`.
+
+        Args:
+            v: An L2-normalised task embedding.
+
+        Returns:
+            A (per-arm probabilities, nearest-neighbour similarity) pair.
+        """
         sims = self.emb @ v
         k = min(self.k, len(sims))
         nn = np.argsort(-sims)[:k]
@@ -253,7 +288,17 @@ class Router:
         return (self.resolved[:, nn] * w).sum(axis=1) / w.sum(), float(sims[nn[0]])
 
     def route_embedding(self, v: np.ndarray) -> Decision:
-        """Route from a pre-computed, L2-normalised embedding of the task text."""
+        """Route from a pre-computed, L2-normalised embedding of the task text.
+
+        Args:
+            v: The task embedding. Normalised internally if not already unit-length.
+
+        Returns:
+            The routing `Decision`: chosen arm, predicted odds, and request kwargs.
+
+        Raises:
+            ValueError: If `v` is the zero vector and cannot be normalised.
+        """
         v = np.asarray(v, dtype=float)
         n = np.linalg.norm(v)
         if n == 0:
@@ -273,20 +318,27 @@ class Router:
         if off:
             pick, fb = self.fallback, True
         spec = self.arm_spec[self.arms[pick]]
-        return Decision(model=spec["model"], effort=spec.get("effort"),
+        return Decision(model=spec.model, effort=spec.effort,
                         arm_id=self.arms[pick], p_solve=float(p[pick]),
                         est_cost_usd=float(self.med_cost[pick]), nearest_sim=nearest,
                         off_distribution=off, fallback_used=fb,
-                        request_kwargs=spec["request_kwargs"])
+                        request_kwargs=spec.request_kwargs)
 
     def route(self, task_text: str, *, api_key: str | None = None,
              base_url: str | None = None) -> Decision:
         """Embed `task_text` with the artifact's embedding model, then route.
 
-        `base_url` overrides the artifact's own `embed_base_url` (present when
-        `embed_model` isn't actually hosted by OpenAI -- e.g. a local server).
+        Args:
+            task_text: The raw task/issue text to route (truncated to 8000 chars).
+            api_key: OpenAI API key; falls back to the client default, or "not-needed"
+                when `base_url` points at a local server that ignores auth.
+            base_url: Overrides the artifact's own `embed_base_url` (present when
+                `embed_model` isn't actually hosted by OpenAI -- e.g. a local server).
+
+        Returns:
+            The routing `Decision` for this task.
         """
-        import openai
+        import openai  # deferred: keeps this module import-light enough to drop into
 
         base_url = base_url or self.meta.get("embed_base_url")
         cl = openai.OpenAI(api_key=api_key or ("not-needed" if base_url else None),
@@ -297,6 +349,11 @@ class Router:
 
 
 def main_predict(artifact_dir: str = "results") -> None:
+    """CLI (`demo`): load the router artifact and route one demo task, printing the decision.
+
+    Args:
+        artifact_dir: Directory holding the router_v0.{json,npz} artifact.
+    """
     import os as _os
 
     # Demo convenience only. The module itself never reads a .env, so it stays droppable
@@ -324,9 +381,10 @@ def main_predict(artifact_dir: str = "results") -> None:
 
 
 # ============================================================================ route
-@dataclasses.dataclass
-class Matrix:
+class Matrix(BaseModel):
     """A dense (arm x problem) outcome+cost matrix with per-problem features."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     arms: list[str]
     qids: list[str]
@@ -338,13 +396,15 @@ class Matrix:
     cost: np.ndarray               # (n_arms, n_probs) float USD
     difficulty: list[str]
     group: list[str]               # contest id -- the CV grouping key
-    emb: np.ndarray | None = None  # (n_probs, d) L2-normalised
+    emb: np.ndarray | None = None  # (n_probs, d) L2-normalised; set by embed()/attach_embeddings()
 
     @property
     def n(self) -> int:
+        """Number of problems in this matrix."""
         return len(self.qids)
 
     def arm_idx(self, a: str) -> int:
+        """Return the row index of arm `a`."""
         return self.arms.index(a)
 
 
@@ -355,6 +415,17 @@ def contest_of(qid: str) -> str:
 
 
 def load_matrix(min_coverage: float = 0.9) -> Matrix:
+    """Load the LiveCodeBench outcome matrix from `results/episodes/*.json`.
+
+    Args:
+        min_coverage: Minimum fraction of problems an arm must have been run on to
+            be kept; drops partially-swept arms that would otherwise shrink the
+            complete-matrix intersection to a handful of problems.
+
+    Returns:
+        The dense (arm x problem) `Matrix`, restricted to problems every surviving
+        arm was run on.
+    """
     recs = []
     for f in glob.glob(str(ROOT / "results" / "episodes" / "*.json")):
         r = json.loads(pathlib.Path(f).read_text())
@@ -391,11 +462,17 @@ def load_matrix(min_coverage: float = 0.9) -> Matrix:
             grd[i, j] = g
             cost[i, j] = r.get("cost_usd") or 0.0
     diff = [cell[(arms[0], q)]["difficulty"] for q in keep]
-    return Matrix(arms, keep, res, grd, cost, diff, [contest_of(q) for q in keep])
+    return Matrix(arms=arms, qids=keep, resolved=res, graded=grd, cost=cost,
+                 difficulty=diff, group=[contest_of(q) for q in keep])
 
 
 def attach_embeddings(m: Matrix, statements: dict[str, str]) -> None:
-    """Embed problem statements with text-embedding-3-large, cached on disk."""
+    """Embed problem statements with text-embedding-3-large, cached on disk.
+
+    Args:
+        m: The matrix to attach embeddings to; mutates `m.emb` in place.
+        statements: Problem id -> statement text, for ids in `m.qids` missing from cache.
+    """
     cache: dict[str, list[float]] = {}
     if EMB_CACHE.exists():
         cache = json.loads(EMB_CACHE.read_text())
@@ -424,21 +501,45 @@ Plan = list[int]
 
 
 def p_always(idx: int):
+    """Build a policy that always routes to arm `idx`."""
     return lambda m, tr, j: [idx]
 
 
 def p_random(seed: int = 0):
+    """Build a policy that routes to a uniformly random arm, seeded for reproducibility."""
     rng = random.Random(seed)
     return lambda m, tr, j: [rng.randrange(len(m.arms))]
 
 
 def p_cascade(cheap: int, strong: int):
-    """FrugalGPT: run cheap, escalate on failure. No predictor, no training. THE BAR."""
+    """Build the FrugalGPT cascade policy: run `cheap`, escalate to `strong` on failure.
+
+    No predictor, no training -- this is THE BAR a learned router must beat. Measured
+    on LiveCodeBench the cascade sits at 1.81x cheaper than the strongest arm (parity
+    oracle: 6.54x), so the cascade, not the priciest arm, is what "beating the baseline" means.
+
+    Args:
+        cheap: Index of the first (cheap) arm to try.
+        strong: Index of the arm to escalate to on failure.
+
+    Returns:
+        A policy callable of `(matrix, train_indices, test_index) -> Plan`.
+    """
     return lambda m, tr, j: [cheap, strong]
 
 
 def _knn_probs(m: Matrix, tr: np.ndarray, j: int, k: int) -> np.ndarray:
-    """Per-arm P(resolve) for problem j, from its k nearest TRAIN neighbours."""
+    """Compute each arm's P(resolve) for problem j from its k nearest TRAIN neighbours.
+
+    Args:
+        m: The full matrix (train + test).
+        tr: Indices of problems eligible as neighbours (the training fold).
+        j: Index of the problem to predict for.
+        k: Number of nearest neighbours to weight by similarity.
+
+    Returns:
+        Per-arm predicted probability of resolving problem `j`.
+    """
     sims = m.emb[tr] @ m.emb[j]
     k = min(k, len(tr))
     nn = tr[np.argsort(-sims)[:k]]
@@ -447,8 +548,18 @@ def _knn_probs(m: Matrix, tr: np.ndarray, j: int, k: int) -> np.ndarray:
 
 
 def p_knn_threshold(k: int = 12, tau: float = 0.6):
-    """Cheapest arm whose predicted P(resolve) clears tau; fall back to the best arm."""
+    """Build a policy: cheapest arm whose predicted P(resolve) clears tau.
+
+    Args:
+        k: Number of nearest neighbours to weight by similarity.
+        tau: Minimum predicted P(resolve) required to pick an arm.
+
+    Returns:
+        A policy callable of `(matrix, train_indices, test_index) -> Plan`; falls
+        back to the best-observed arm if nothing clears `tau`.
+    """
     def go(m: Matrix, tr: np.ndarray, j: int) -> Plan:
+        """Return the cheapest arm clearing `tau`, or the best-observed arm otherwise."""
         p = _knn_probs(m, tr, j, k)
         med = np.median(m.cost[:, tr], axis=1)
         order = np.argsort(med)
@@ -460,12 +571,22 @@ def p_knn_threshold(k: int = 12, tau: float = 0.6):
 
 
 def p_knn_two_sided(k: int = 12, tau: float = 0.6, hopeless: float = 0.15):
-    """Adds the abandon-down rule: if NO arm is predicted to solve it, spend the least.
+    """Build a policy adding the abandon-down rule: if no arm looks likely, spend the least.
 
     Measured on the free SWE-bench matrix this is worth 1.40x -> 1.97x, because a naive
     `argmin cost s.t. p>=tau` router sends the hopeless stratum to the priciest arm.
+
+    Args:
+        k: Number of nearest neighbours to weight by similarity.
+        tau: Minimum predicted P(resolve) required to pick an arm normally.
+        hopeless: If the best predicted P(resolve) is below this, route to the
+            cheapest arm instead of escalating.
+
+    Returns:
+        A policy callable of `(matrix, train_indices, test_index) -> Plan`.
     """
     def go(m: Matrix, tr: np.ndarray, j: int) -> Plan:
+        """Return the cheapest arm, the cheapest clearing `tau`, or the best-observed arm."""
         p = _knn_probs(m, tr, j, k)
         med = np.median(m.cost[:, tr], axis=1)
         order = np.argsort(med)
@@ -479,8 +600,20 @@ def p_knn_two_sided(k: int = 12, tau: float = 0.6, hopeless: float = 0.15):
 
 
 def p_knn_cascade(k: int = 12, tau: float = 0.6):
-    """Predict, then still escalate on failure -- the hybrid of KNN and cascade."""
+    """Build a policy: predict with kNN, then still escalate on failure.
+
+    The hybrid of `p_knn_threshold` and `p_cascade`.
+
+    Args:
+        k: Number of nearest neighbours to weight by similarity.
+        tau: Minimum predicted P(resolve) required to pick an arm without also
+            trying the best-observed arm as a second try.
+
+    Returns:
+        A policy callable of `(matrix, train_indices, test_index) -> Plan`.
+    """
     def go(m: Matrix, tr: np.ndarray, j: int) -> Plan:
+        """Return the cheapest arm clearing `tau` (plus the best arm as a fallback try)."""
         p = _knn_probs(m, tr, j, k)
         med = np.median(m.cost[:, tr], axis=1)
         order = np.argsort(med)
@@ -494,6 +627,16 @@ def p_knn_cascade(k: int = 12, tau: float = 0.6):
 
 # --------------------------------------------------------------------------- evaluation
 def grouped_folds(m: Matrix, n_folds: int = 5, seed: int = 0) -> list[np.ndarray]:
+    """Split problems into folds by group (e.g. contest), so no group spans folds.
+
+    Args:
+        m: The matrix whose `group` labels define the split.
+        n_folds: Number of folds to produce.
+        seed: Shuffle seed, for reproducibility.
+
+    Returns:
+        One array of problem indices per fold.
+    """
     groups = sorted(set(m.group))
     random.Random(seed).shuffle(groups)
     buckets: list[list[str]] = [[] for _ in range(n_folds)]
@@ -503,7 +646,17 @@ def grouped_folds(m: Matrix, n_folds: int = 5, seed: int = 0) -> list[np.ndarray
 
 
 def run_policy(m: Matrix, policy, folds: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-    """Returns per-problem (resolved, cost) under CV -- each problem judged out-of-fold."""
+    """Run a policy under grouped cross-validation.
+
+    Args:
+        m: The matrix to evaluate on.
+        policy: A callable of `(matrix, train_indices, test_index) -> Plan` (an
+            ordered list of arm indices to try, stopping at the first resolve).
+        folds: Problem-index groups from `grouped_folds`; each fold is held out in turn.
+
+    Returns:
+        Per-problem `(resolved, cost)` arrays, each problem judged out-of-fold.
+    """
     res = np.zeros(m.n, dtype=bool)
     cost = np.zeros(m.n, dtype=float)
     for te in folds:
@@ -521,6 +674,17 @@ def run_policy(m: Matrix, policy, folds: list[np.ndarray]) -> tuple[np.ndarray, 
 
 
 def oracle(m: Matrix, parity_to: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Compute the cheapest-arm-that-solves-it oracle, optionally at matched accuracy.
+
+    Args:
+        m: The matrix to evaluate on.
+        parity_to: If given, an arm index; problems that arm fails are scored as
+            failed (at that arm's cost) rather than solved by a cheaper alternative,
+            so the oracle's accuracy exactly matches that arm's instead of exceeding it.
+
+    Returns:
+        Per-problem `(resolved, cost)` arrays.
+    """
     res = np.zeros(m.n, dtype=bool)
     cost = np.zeros(m.n, dtype=float)
     for j in range(m.n):
@@ -537,7 +701,19 @@ def oracle(m: Matrix, parity_to: int | None = None) -> tuple[np.ndarray, np.ndar
 
 def boot_ratio(base_cost: np.ndarray, pol_cost: np.ndarray, groups: list[str],
                n: int = 10000, seed: int = 0) -> tuple[float, float]:
-    """Cluster bootstrap (resample contests) on the cost ratio base/policy."""
+    """Cluster-bootstrap (resample groups) a 95% CI on the cost ratio base/policy.
+
+    Args:
+        base_cost: Per-problem cost under the baseline policy.
+        pol_cost: Per-problem cost under the policy being compared.
+        groups: Per-problem group label (e.g. contest); resampling is by group, not
+            by problem, since problems in one group are not independent.
+        n: Number of bootstrap resamples.
+        seed: RNG seed, for reproducibility.
+
+    Returns:
+        The (2.5th percentile, 97.5th percentile) of the resampled cost ratio.
+    """
     rng = np.random.default_rng(seed)
     gs = sorted(set(groups))
     idx = {g: np.array([i for i, x in enumerate(groups) if x == g]) for g in gs}
@@ -553,7 +729,15 @@ def boot_ratio(base_cost: np.ndarray, pol_cost: np.ndarray, groups: list[str],
 
 
 def mcnemar(a: np.ndarray, b: np.ndarray) -> float:
-    """Two-sided exact McNemar p-value on paired resolve outcomes."""
+    """Compute the two-sided exact McNemar p-value on paired resolve outcomes.
+
+    Args:
+        a: Baseline per-problem resolved outcomes.
+        b: Comparison per-problem resolved outcomes, paired with `a`.
+
+    Returns:
+        The two-sided exact McNemar p-value for whether `a` and `b` differ.
+    """
     n01 = int((~a & b).sum())
     n10 = int((a & ~b).sum())
     n = n01 + n10

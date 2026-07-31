@@ -1,13 +1,6 @@
-"""Freeze the router into a portable artifact, then prove the artifact reproduces the CV.
-
-This is the production export step, not a research/analysis script -- kept as its own
-small, dependency-obvious CLI.
-
-Writes results/router_v0.{json,npz}. The self-test re-derives the leave-one-repo-out
-decisions through the exported Router class and checks the resulting cost/quality against
-the numbers measured in the nested-CV race. If the artifact disagrees with the experiment,
-this fails loudly rather than shipping a router that behaves differently from the one
-that was measured.
+"""Freeze the router into results/router_v0.{json,npz}, then self-test that the
+artifact reproduces the nested-CV race -- failing loudly if it doesn't, rather than
+shipping a router that behaves differently from the one that was measured.
 """
 from __future__ import annotations
 
@@ -22,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from router import experiments  # noqa: E402
 from router import router_core as route  # noqa: E402
 from router.harness import load_env  # noqa: E402
-from router.router_core import Router  # noqa: E402
+from router.router_core import ArmSpec, Router  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -47,8 +40,15 @@ LOCAL_EMBED_MODEL = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
 LOCAL_EMBED_BASE_URL = "http://127.0.0.1:8081/v1"
 
 
-def arm_to_spec(arm: str) -> dict:
-    """`mini_swe_agent_gpt_5_6_sol_medium` -> real provider model id + request kwargs."""
+def arm_to_spec(arm: str) -> ArmSpec:
+    """Parse an internal arm id into its real provider model id and request kwargs.
+
+    Args:
+        arm: An arm id like `mini_swe_agent_gpt_5_6_sol_medium`.
+
+    Returns:
+        The resolved `ArmSpec` (model, effort, provider, request kwargs).
+    """
     s = re.sub(r"^mini_swe_agent_", "", arm)
     eff = next((e for e in EXPORT_EFFORTS if s.endswith("_" + e)), None)
     core = s[: -(len(eff) + 1)] if eff else s
@@ -67,13 +67,18 @@ def arm_to_spec(arm: str) -> dict:
         kw = {"model": model}
         if eff:
             kw["reasoning"] = {"effort": eff}
-    return {"model": model, "effort": eff,
-            "provider": "anthropic" if anthropic else "openai", "request_kwargs": kw}
+    return ArmSpec(model=model, effort=eff,
+                   provider="anthropic" if anthropic else "openai", request_kwargs=kw)
 
 
 def cmd_export_router(local: bool = False) -> None:
-    """`local=True` re-embeds with LOCAL_EMBED_MODEL instead of OpenAI, writing
-    router_v0_local.{json,npz} alongside (not over) the cloud-embedded router_v0.*."""
+    """Freeze the router into results/router_v0.{json,npz} and self-test the artifact.
+
+    Args:
+        local: If True, re-embeds with LOCAL_EMBED_MODEL instead of OpenAI, writing
+            router_v0_local.{json,npz} alongside (not over) the cloud-embedded
+            router_v0.*.
+    """
     load_env()
     OUT = ROOT / "results"
 
@@ -98,7 +103,7 @@ def cmd_export_router(local: bool = False) -> None:
         "embed_model": LOCAL_EMBED_MODEL if local else "text-embedding-3-large",
         "embed_base_url": LOCAL_EMBED_BASE_URL if local else None,
         "arms": arms,
-        "arm_spec": {a: arm_to_spec(a) for a in arms},
+        "arm_spec": {a: arm_to_spec(a).model_dump() for a in arms},
         "k": EXPORT_K, "tau": EXPORT_TAU, "sim_floor": SIM_FLOOR,
         "fallback_arm_index": fallback,
         "provenance": (
@@ -179,6 +184,7 @@ def cmd_export_router(local: bool = False) -> None:
 
 
 def main(local: bool = False) -> None:
+    """CLI entrypoint: forward to `cmd_export_router`."""
     cmd_export_router(local)
 
 

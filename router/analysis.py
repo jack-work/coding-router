@@ -28,22 +28,22 @@ from router.router_core import STANDARD  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # ============================================================ analyze-phase1
-"""Phase 1 analysis: the measured arm ladder, data-quality flags, and routing headroom.
-
-Everything here is MEASURED by us on LiveCodeBench AtCoder via E2B sandboxes -- not published.
-Reports the three things that decide the next phase:
-  1. the cost-quality frontier over our own arms (which arms are even worth carrying),
-  2. data-quality flags (items where the label is probably wrong, and errored requests),
-  3. oracle + cascade headroom, i.e. whether routing can pay at all on this task family.
-"""
-
-
 def load_episodes() -> list[dict]:
+    """Load every raw episode record under results/episodes/*.json."""
     return [json.loads(pathlib.Path(f).read_text())
             for f in glob.glob(str(ROOT / "results" / "episodes" / "*.json"))]
 
 
 def cmd_analyze_phase1() -> None:
+    """CLI (`analyze-phase1`): the measured arm ladder, data-quality flags, and headroom.
+
+    Everything here is MEASURED by us on LiveCodeBench AtCoder via E2B sandboxes, not
+    published. Reports the three things that decide the next phase: (1) the
+    cost-quality frontier over our own arms (which arms are even worth carrying),
+    (2) data-quality flags (items where the label is probably wrong, and errored
+    requests), and (3) oracle + cascade headroom, i.e. whether routing can pay at all
+    on this task family.
+    """
     recs = [r for r in load_episodes() if "arm" in r]
     qids = sorted({r["qid"] for r in recs})
     # Drop arms that were never swept over the full problem set (e.g. a leftover smoke-test
@@ -59,6 +59,7 @@ def cmd_analyze_phase1() -> None:
     # failed the task. Exclude those cells and report the count, rather than letting
     # provider overload depress an arm's measured accuracy.
     def valid(r: dict) -> bool:
+        """An episode counts as valid evidence only if it wasn't killed by infra."""
         return not r.get("harness_error") and r.get("stop") != "error"
 
     n_bad = sum(1 for r in recs if not valid(r))
@@ -207,22 +208,23 @@ def cmd_analyze_phase1() -> None:
 
 
 # ============================================================ headroom
-"""Measure the routing headroom in the published matrix. Costs nothing.
-
-This is the bail-early gate: if an ORACLE router (perfect foresight, always picks
-the cheapest arm that solves the instance) cannot beat the best single arm on cost
-at equal accuracy, then no learned router can either, and the project should stop.
-
-All numbers here are PUBLISHED-NOT-MEASURED: they come from third-party submissions
-to the SWE-bench bash-only leaderboard, not from our own runs.
-"""
-
 # The 2026-02-17 mini-v2.0.0 cohort: 11 models, same scaffold, same day.
 # Holding the scaffold fixed is what makes cross-model comparison legitimate.
 CLEAN_COHORT_PREFIX = "20260217_mini-v2.0.0_"
 
 
 def load_headroom_matrix(cohort_only: bool) -> tuple[list[str], list[str], dict]:
+    """Load the published SWE-bench bash-only matrix, optionally restricted to one cohort.
+
+    Args:
+        cohort_only: If True, keep only the `CLEAN_COHORT_PREFIX` submissions (same
+            scaffold, same day); otherwise keep every submission (scaffold varies).
+
+    Returns:
+        A (kept_submission_names, shared_instance_ids, raw_parsed_json) tuple. Broken
+        submissions (0 resolved with non-trivial spend -- an infra failure recorded as
+        a model failure) are excluded from the first element.
+    """
     raw = json.loads((ROOT / "results" / "swebench_matrix.json").read_text())
     subs = sorted(raw)
     if cohort_only:
@@ -243,6 +245,16 @@ def load_headroom_matrix(cohort_only: bool) -> tuple[list[str], list[str], dict]
 
 
 def arm_stats(raw, subs, inst):
+    """Compute each submission's accuracy and total cost over the shared instances.
+
+    Args:
+        raw: The raw parsed swebench_matrix.json.
+        subs: Submission names to compute stats for.
+        inst: Shared instance ids to score over.
+
+    Returns:
+        Per-submission `{"arm", "sub", "acc", "cost"}` dicts, sorted by cost ascending.
+    """
     rows = []
     for s in subs:
         det = raw[s]["details"]
@@ -253,6 +265,14 @@ def arm_stats(raw, subs, inst):
 
 
 def cmd_headroom() -> None:
+    """CLI (`headroom`): routing headroom in the published SWE-bench bash-only matrix.
+
+    Costs nothing -- this is the bail-early gate: if an ORACLE router (perfect
+    foresight, always picks the cheapest arm that solves the instance) cannot beat
+    the best single arm on cost at equal accuracy, no learned router can either, and
+    the project should stop. All numbers here are PUBLISHED-NOT-MEASURED: they come
+    from third-party submissions to the SWE-bench bash-only leaderboard, not our own runs.
+    """
     for cohort_only in (True, False):
         tag = ("CLEAN v2.0.0 COHORT (same scaffold, same day)" if cohort_only else
                "ALL SUBMISSIONS (scaffold varies - confounded)")
@@ -324,18 +344,17 @@ def cmd_headroom() -> None:
 
 
 # ============================================================ price-traces
-"""Price the real Claude Code sessions to establish the measured baseline spend.
-
-Only the Claude traces carry a `usage` block, so they are the only ones we can
-price from observed tokens rather than assumption. This total is the denominator
-for any cost-saving claim on real traffic.
-"""
-
 # Models absent from the price table, mapped to their price-equivalent tier.
 PRICE_ALIAS = {"claude-opus-5": "claude-opus-4-8", "claude-sonnet-4-6": "claude-sonnet-5"}
 
 
 def cmd_price_traces() -> None:
+    """CLI (`price-traces`): price real Claude Code sessions to get the measured baseline spend.
+
+    Only the Claude traces carry a `usage` block, so they are the only ones priced
+    from observed tokens rather than assumption. This total is the denominator for
+    any cost-saving claim on real traffic.
+    """
     rows = [json.loads(line) for line in (ROOT / "results" / "trace_tasks.jsonl").open()]
     sessions = [r for r in rows
                 if r["trace_type"] == "claude-code" and r["cache_read"] > 0]
@@ -383,15 +402,6 @@ def cmd_price_traces() -> None:
 
 
 # ============================================================ extract-traces
-"""Extract the real production query distribution from the coding-agent traces.
-
-Each trace record is one API request; several records share a session. The routing
-decision happens once, when a task ARRIVES, so we aggregate per session and keep the
-initial user ask plus realized-effort outcomes (turns, tokens) as difficulty proxies.
-
-Writes results/trace_tasks.jsonl and results/trace_summary.json.
-"""
-
 TRACE_DATA = ROOT.parent / "data" / "peter-coding-router"
 
 # Wrappers that mean "this record is machinery, not a human task statement".
@@ -419,11 +429,20 @@ def clean_ask(prompt: str, trace_type: str) -> str:
 
 
 def is_machine(prompt: str) -> bool:
+    """Return whether `prompt` is harness machinery rather than a human task statement."""
     s = (prompt or "").lstrip()
     return any(s.startswith(x) for x in MACHINE_PREFIXES)
 
 
 def cmd_extract_traces() -> None:
+    """CLI (`extract-traces`): extract the production query distribution from agent traces.
+
+    Each trace record is one API request; several records share a session. The
+    routing decision happens once, when a task ARRIVES, so this aggregates per
+    session and keeps the initial user ask plus realized-effort outcomes (turns,
+    tokens) as difficulty proxies. Writes results/trace_tasks.jsonl and
+    results/trace_summary.json.
+    """
     sessions: dict[str, dict] = {}
     files = sorted(TRACE_DATA.glob("*.jsonl"))
     assert files, f"no trace files under {TRACE_DATA}"
@@ -490,6 +509,7 @@ def cmd_extract_traces() -> None:
             fh.write(json.dumps(r) + "\n")
 
     def q(a, ks=(0.5, 0.9, 0.99)):
+        """Summarize a numeric list as n/min/max/mean plus the requested percentiles."""
         a = sorted(a)
         if not a:
             return {}
