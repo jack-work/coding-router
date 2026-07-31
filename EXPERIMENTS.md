@@ -133,6 +133,29 @@ sweep's fresh picture), plus rank+beta-0.2 (does anchoring buy back rank's quali
 **Honest frontier on FRESH evidence:** factor champion 5.33x/-0.027 (balanced pick),
 nca 5.01x/-0.036, rank-LoRA 8.36x/-0.052 (aggressive pick).
 
+**Round 2 fresh results.** frozen-temps 3.87x/-0.018 (CI [-0.049, +0.010]) — PARITY
+FLOOR CONFIRMED. grpo 7.12x/-0.030 (CI [-0.062, -0.000]) — better than its selection
+seeds (reverse luck possible; seeds 12-17 tiebreak launched for grpo vs rank).
+rank+anchor b0.2: 6.76x/-0.050 — anchoring does NOT buy back rank's quality.
+Offline per-task program CONVERGED: ~3.9x parity / 5.3x -0.027 / 7-8x -0.03..-0.05.
+
+---
+
+## EXP-011 — per-turn routing under injected difficulty (RUNNING, 2026-07-31)
+
+**Motivation.** EXP-010 found no per-turn advantage on LCB because easy episodes offer
+nothing to escalate into. Inject the escalation need: FORCE the weakest arm
+(claude-haiku-4-5@budget, 0.632 LCB resolve) for the first 4 turns of every episode;
+the router takes over from turn 5. If per-turn routing has value anywhere on LCB, it
+is here: the policy must read live struggle signals (public-test failures, exit codes)
+and decide whether/where to escalate. Forced turns are excluded from REINFORCE.
+
+**Setup.** `rl/perturn.py train --sticky --handicap 4` (5 iters x 20 tasks x 2), then
+`eval --handicap 4`: per-turn vs turn0-frozen(post-prefix) vs continue-weak (never
+escalate) vs escalate-opus (always escalate) — the last two bracket the value of
+DECIDING. Pre-registered success: per-turn beats turn0-frozen on paired graded or
+cost at matched other-axis; both must beat continue-weak to show escalation matters.
+
 ## EXP-004 — 8B encoder under the trained decision rule (2026-07-31)
 
 **Motivation.** EXP-001 showed 8B embeddings buy quality (kNN -0.007). Does the

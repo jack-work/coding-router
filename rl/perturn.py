@@ -233,7 +233,10 @@ class LadderPolicy:
 
 # --------------------------------------------------------------------------- episode
 def run_episode(prob, feats: Feats, policy: Policy, rng: np.random.Generator,
-                greedy: bool, tag: str) -> dict:
+                greedy: bool, tag: str, handicap: tuple[int, int] | None = None) -> dict:
+    """handicap=(arm_idx, k): FORCE that arm for the first k turns (EXP-011: injected
+    difficulty so mid-episode escalation has value). Forced turns are excluded from
+    the policy gradient."""
     key = f"{prob.qid}__{tag}"
     dest = EP_DIR / f"{key}.json"
     if dest.exists():
@@ -251,10 +254,13 @@ def run_episode(prob, feats: Feats, policy: Policy, rng: np.random.Generator,
         s.write("check.py", sandbox.CHECKER)
         for turn in range(MAX_TURNS):
             x = feats.vec(turn, cost, passed_frac, wrote, last_ok, prev_arm)
-            if greedy:
-                a, p = int(np.argmax(policy.logits(x))), None
+            forced = bool(handicap and turn < handicap[1])
+            if forced:
+                a = handicap[0]
+            elif greedy:
+                a = int(np.argmax(policy.logits(x)))
             else:
-                a, p = policy.sample(x, rng)
+                a, _ = policy.sample(x, rng)
             prev_arm = a
             try:
                 text, cmds, c, stop = one_turn(ARMS[a], task, history)
@@ -263,7 +269,7 @@ def run_episode(prob, feats: Feats, policy: Policy, rng: np.random.Generator,
                 break
             cost += c
             turns.append({"arm": a, "x": x.tolist(), "cost": c, "n_cmds": len(cmds),
-                          "stop": stop})
+                          "stop": stop, "forced": forced})
             history.append({"kind": "assistant", "text": text[:3000]})
             if not cmds:
                 break  # model stopped (DONE or gave up)
@@ -329,7 +335,9 @@ def make_feats(qid: str, train_qids: set[str]) -> Feats:
 
 # --------------------------------------------------------------------------- train / eval
 def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
-              workers: int = 10, lr: float = 0.05, sticky: bool = False) -> None:
+              workers: int = 10, lr: float = 0.05, sticky: bool = False,
+              handicap_k: int = 0) -> None:
+    handicap = (0, handicap_k) if handicap_k else None  # arm 0 = haiku@budget, weakest
     load_env()
     sandbox.semaphore(workers)
     train, evalp = contest_split()
@@ -343,7 +351,7 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
     mlog = (OUT / "metrics.jsonl").open("a")
     rng0 = np.random.default_rng(SEED)
 
-    pref = "st-" if sticky else ""
+    pref = ("st-" if sticky else "") + (f"h{handicap_k}-" if handicap_k else "")
     for it in range(iters):
         batch = list(rng0.choice(len(train), min(tasks_per_iter, len(train)), replace=False))
         jobs = [(train[i], r) for i in batch for r in range(rollouts)]
@@ -351,7 +359,8 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(run_episode, p, feats[p.qid], policy,
                               np.random.default_rng(hash((it, p.qid, r)) % 2**32),
-                              False, f"{pref}it{it}r{r}"): (p, r) for p, r in jobs}
+                              False, f"{pref}it{it}r{r}", handicap): (p, r)
+                    for p, r in jobs}
             for f in cf.as_completed(futs):
                 rec = f.result()
                 recs.append(rec)
@@ -369,7 +378,7 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
             for rec in group:
                 adv = rec["reward"] - b
                 for t in rec["turns"]:
-                    if "x" not in t or "cost" not in t:
+                    if "x" not in t or "cost" not in t or t.get("forced"):
                         continue
                     x = np.array(t["x"])
                     z = policy.logits(x)
@@ -399,7 +408,7 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
     print(f"train done; final policy {OUT / f'policy_it{iters-1}.json'}")
 
 
-def cmd_eval(policy_path: str, workers: int = 10) -> None:
+def cmd_eval(policy_path: str, workers: int = 10, handicap_k: int = 0) -> None:
     """EXP-010 comparison: trained per-turn policy vs current bests, all LIVE episodes
     on the held-out contests: turn0-frozen (per-task control), hand ladder cascade,
     and the two strongest static arms from the offline matrix."""
@@ -410,6 +419,7 @@ def cmd_eval(policy_path: str, workers: int = 10) -> None:
     feats = {p.qid: make_feats(p.qid, train_qids) for p in evalp}
     policy = Policy.load(pathlib.Path(policy_path))
     sticky = policy.W.shape[1] > DIM
+    handicap = (0, handicap_k) if handicap_k else None
     factories = {
         "perturn": lambda: policy,
         "turn0-frozen": lambda: Turn0Policy(policy),
@@ -417,18 +427,24 @@ def cmd_eval(policy_path: str, workers: int = 10) -> None:
         "static-nano@high": lambda: StaticPolicy(ARM_IDS.index("gpt-5.4-nano@high")),
         "static-opus@medium": lambda: StaticPolicy(ARM_IDS.index("claude-opus-4-8@medium")),
     }
+    if handicap:  # EXP-011 controls: never escalate / always escalate to strongest
+        factories["continue-weak"] = lambda: StaticPolicy(0)
+        factories["escalate-opus"] = lambda: StaticPolicy(
+            ARM_IDS.index("claude-opus-4-8@medium"))
     stem = pathlib.Path(policy_path).stem
+    hpre = f"h{handicap_k}-" if handicap_k else ""
     rows = {}
     for name, mk in factories.items():
         # ladder/static are policy-independent (cache across evals); the rest are not
-        tag = f"eval-{name}" if name.startswith(("ladder", "static")) \
-            else f"eval-{name}-{stem}"
+        tag = f"eval-{hpre}{name}" if name.startswith(("ladder", "static", "continue",
+                                                       "escalate")) \
+            else f"eval-{hpre}{name}-{stem}"
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(run_episode, p,
                               dataclasses.replace(
                                   feats[p.qid],
                                   sticky=sticky and name in ("perturn", "turn0-frozen")),
-                              mk(), np.random.default_rng(0), True, tag)
+                              mk(), np.random.default_rng(0), True, tag, handicap)
                     for p in evalp]
             recs = [f.result() for f in cf.as_completed(futs)]
         rows[name] = recs
@@ -456,11 +472,14 @@ def cmd_smoke() -> None:
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "smoke"
+    def _flag(name: str) -> int:
+        return int(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else 0
+
     if cmd == "smoke":
         cmd_smoke()
     elif cmd == "train":
-        cmd_train(sticky="--sticky" in sys.argv)
+        cmd_train(sticky="--sticky" in sys.argv, handicap_k=_flag("--handicap"))
     elif cmd == "eval":
-        cmd_eval(sys.argv[2])
+        cmd_eval(sys.argv[2], handicap_k=_flag("--handicap"))
     else:
         raise SystemExit(f"unknown command {cmd}")
