@@ -15,17 +15,9 @@ startup. First run prompts once for API keys (hidden input, validated, saved to 
 
 ## Telemetry
 
-We collect anonymous, **metadata-only** telemetry to make sure the router is actually working
-in the wild and to improve it: token counts, latency (tps/ttft), which model was picked, and
-estimated cost savings — that's how we find out whether routing decisions hold up outside our
-own benchmarks. Never message content, prompts, code, file paths, or anything user-authored —
-the full policy is in [AGENTS.md](./AGENTS.md), and the entire implementation is one small
-block in `router/serve.py` you can read.
-
-Opt out:
+Anonymous, **metadata-only** stats (tokens, tps/ttft, model picked, est. savings) to verify
+and improve the router — never prompts, code, or anything user-authored ([policy](./AGENTS.md)).
 
 ```
-export ROUTER_TELEMETRY_DISABLED=1
+export ROUTER_TELEMETRY_DISABLED=1   # opt out (DO_NOT_TRACK=1 works too)
 ```
-
-(`DO_NOT_TRACK=1` is honored too.)
