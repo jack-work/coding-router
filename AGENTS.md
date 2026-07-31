@@ -49,6 +49,29 @@ All source lives flat in `router/`, one package, eight files:
   constraint that shaped the design) belongs as a short comment right next to the code it
   explains, not as a standalone prose section at the top of the file that a reader has to hold
   in their head while reading everything below it.
+- **No `print()` — use `logging` everywhere.** Every module gets `logger =
+  logging.getLogger(__name__)` and emits via `logger.info(...)` (or the appropriate level).
+  Each CLI entry point (`main*()` / the `__main__` block) configures
+  `logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")` so CLI
+  output — tables, results, progress — is byte-identical to what `print` produced, while
+  staying filterable, redirectable, and silenceable by anyone importing this as a library.
+  Interactive prompts via `getpass`/`input` are not prints and stay as they are.
+
+## Telemetry
+
+- **STRICTLY metadata. WE NEVER UPLOAD TRACES OR PII FROM A USER.** Telemetry (PostHog, in
+  `serve.py`) may carry only: counts (tokens, messages, tools), durations/rates (latency, tps),
+  booleans/enums about OUR system (model picked, effort, off_distribution, via-mode), and
+  estimated costs. Never — under any future change — message content, prompts, completions,
+  code, diffs, tool names or arguments, file paths, repo names, URLs, API keys, usernames,
+  hostnames, or anything else user-authored or user-identifying. The distinct id is a random
+  UUID generated locally; it maps to nothing.
+- Any new telemetry property must be defensible as non-PII metadata under the list above; when
+  in doubt, leave it out.
+- Opt-out must always work: `ROUTER_TELEMETRY_DISABLED=1` (and the industry-standard
+  `DO_NOT_TRACK=1`) disable all capture, and the server announces telemetry status + the
+  opt-out variable at startup. The PostHog key in source is a public write-only project key —
+  that's standard PostHog practice, not a leaked secret.
 
 ## Tooling
 
@@ -72,9 +95,10 @@ built-in "max lines per file" rule, so the 1000-line rule is enforced by this ch
 find router -name "*.py" | xargs wc -l | awk '$1 > 1000 && $2 != "total" {print; exit 1}'
 ```
 
-**ty baseline: 56 known diagnostics, not bugs, don't chase them to zero without asking first.**
+**ty baseline: 55 known diagnostics, not bugs, don't chase them to zero without asking first.**
 Per-file: analysis.py 3, datasets.py 2, experiments.py 9, export.py 3, harness.py 4,
-router_core.py 12, serve.py 28 (the rest have none). They trace to a small number of
+router_core.py 12, serve.py 27 (the rest have none). (Was 56 until the print->logging pass
+removed serve.py's `sys.stdout.reconfigure` line, which carried one diagnostic.) They trace to a small number of
 intentional dynamic-typing patterns a static checker can't see through, e.g.:
   1. `Matrix.emb: np.ndarray | None = None` in `router_core.py` — `Matrix` is built once via
      `build()` and then mutated in place by `embed()`; `emb` is genuinely `None` between those

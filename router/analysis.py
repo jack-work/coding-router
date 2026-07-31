@@ -14,6 +14,7 @@ import collections
 import glob
 import itertools
 import json
+import logging
 import pathlib
 import re
 import statistics
@@ -26,6 +27,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from router.router_core import STANDARD  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 # ============================================================ analyze-phase1
 def load_episodes() -> list[dict]:
@@ -53,7 +56,7 @@ def cmd_analyze_phase1() -> None:
     arms = sorted(a for a, n in counts.items() if n >= 0.5 * len(qids))
     dropped = {a: n for a, n in counts.items() if a not in arms}
     if dropped:
-        print(f"NOTE dropping under-swept arms {dropped} (need >= {int(0.5*len(qids))} episodes)")
+        logger.info(f"NOTE dropping under-swept arms {dropped} (need >= {int(0.5*len(qids))} episodes)")
     recs = [r for r in recs if r["arm"] in arms]
     # An episode killed by a provider 429/529 or a harness fault is NOT evidence the model
     # failed the task. Exclude those cells and report the count, rather than letting
@@ -64,22 +67,22 @@ def cmd_analyze_phase1() -> None:
 
     n_bad = sum(1 for r in recs if not valid(r))
     recs = [r for r in recs if valid(r)]
-    print(f"NOTE excluded {n_bad} episodes killed by provider/harness errors "
-          f"(not model failures)")
+    logger.info(f"NOTE excluded {n_bad} episodes killed by provider/harness errors "
+                f"(not model failures)")
     cell = {(r["arm"], r["qid"]): r for r in recs}
-    print(f"{len(recs)} episodes | {len(arms)} arms x {len(qids)} problems "
-          f"({len(arms)*len(qids)} full matrix)\n")
+    logger.info(f"{len(recs)} episodes | {len(arms)} arms x {len(qids)} problems "
+                f"({len(arms)*len(qids)} full matrix)\n")
 
     # ---------------------------------------------------------------- data quality first
-    print("=== DATA QUALITY (check before believing any accuracy) ===")
+    logger.info("=== DATA QUALITY (check before believing any accuracy) ===")
     errored = [r for r in recs if r.get("harness_error")
                or (r.get("turns") == 1 and not r.get("cost_usd"))]
-    print(f"errored/zero-cost single-turn episodes: {len(errored)}")
+    logger.info(f"errored/zero-cost single-turn episodes: {len(errored)}")
     for r in errored[:6]:
-        print(f"    {r['qid']:12s} {r['arm']:26s} stop={r.get('stop')} "
-              f"err={str(r.get('error') or r.get('harness_error'))[:80]}")
+        logger.info(f"    {r['qid']:12s} {r['arm']:26s} stop={r.get('stop')} "
+                    f"err={str(r.get('error') or r.get('harness_error'))[:80]}")
     caps = collections.Counter(r["arm"] for r in recs if r.get("stop") == "max_tokens")
-    print(f"cap_hits (must be ~0 after the max_tokens fix): {dict(caps) or 'none'}")
+    logger.info(f"cap_hits (must be ~0 after the max_tokens fix): {dict(caps) or 'none'}")
 
     # An item where nearly every arm lands on the SAME near-miss score is a broken test,
     # not N models making an identical mistake. These are label noise and get excluded.
@@ -93,13 +96,13 @@ def cmd_analyze_phase1() -> None:
         near = [s for s in scores if 0.9 <= s < 1.0]
         if len(near) >= len(rs) - 1 and len(near) >= 5:
             suspect.append((q, len(near), len(rs), round(statistics.median(near), 3)))
-    print(f"\nsuspect items (>=5 arms stuck at 90-99% -- probably a bad test case): {len(suspect)}")
+    logger.info(f"\nsuspect items (>=5 arms stuck at 90-99% -- probably a bad test case): {len(suspect)}")
     for q, n, tot, med in suspect[:8]:
-        print(f"    {q:12s} {n}/{tot} arms at median {med:.3f}")
+        logger.info(f"    {q:12s} {n}/{tot} arms at median {med:.3f}")
     bad = {q for q, *_ in suspect}
 
     # ---------------------------------------------------------------- the ladder
-    print("\n=== MEASURED ARM LADDER (suspect items excluded) ===")
+    logger.info("\n=== MEASURED ARM LADDER (suspect items excluded) ===")
     ok_q = [q for q in qids if q not in bad]
     rows = []
     for a in arms:
@@ -112,19 +115,19 @@ def cmd_analyze_phase1() -> None:
                      "per": cost / len(rs),
                      "med_s": statistics.median([r.get("total_wall_s", 0) for r in rs])})
     rows.sort(key=lambda r: r["per"])
-    print(tabulate(
+    logger.info(tabulate(
         [(r["arm"], r["n"], f"{r['acc']*100:.1f}%", f"{r['per']:.4f}", f"{r['cost']:.3f}",
           f"{r['med_s']:.1f}") for r in rows],
         headers=["arm", "n", "acc", "$/prob", "total$", "med s"], disable_numparse=True))
 
     # Pareto frontier: an arm is dominated if something cheaper is at least as accurate.
     front = [r for r in rows if not any(o["per"] < r["per"] and o["acc"] >= r["acc"] for o in rows)]
-    print(f"\n  ON THE COST-QUALITY FRONTIER: {', '.join(r['arm'] for r in front)}")
-    print(f"  DOMINATED (a cheaper arm is >= as accurate): "
-          f"{', '.join(r['arm'] for r in rows if r not in front) or 'none'}")
+    logger.info(f"\n  ON THE COST-QUALITY FRONTIER: {', '.join(r['arm'] for r in front)}")
+    logger.info(f"  DOMINATED (a cheaper arm is >= as accurate): "
+                f"{', '.join(r['arm'] for r in rows if r not in front) or 'none'}")
 
     # ---------------------------------------------------------------- difficulty gradient
-    print("\n=== accuracy by difficulty ===")
+    logger.info("\n=== accuracy by difficulty ===")
     diff = {r["qid"]: r["difficulty"] for r in recs}
     bands = ("easy", "medium", "hard")
     diff_table = []
@@ -135,25 +138,25 @@ def cmd_analyze_phase1() -> None:
                  if (r["arm"], q) in cell and diff.get(q) == b]
             out.append(f"{sum(1 for x in g if x.get('resolved'))/len(g)*100:.1f}%" if g else "-")
         diff_table.append((r["arm"], *out))
-    print(tabulate(diff_table, headers=["arm", *bands], disable_numparse=True))
+    logger.info(tabulate(diff_table, headers=["arm", *bands], disable_numparse=True))
 
     # ---------------------------------------------------------------- routing headroom
-    print("\n=== ROUTING HEADROOM on our measured arms ===")
+    logger.info("\n=== ROUTING HEADROOM on our measured arms ===")
     full = [q for q in ok_q if all((a, q) in cell for a in arms)]
     solved = {q: [a for a in arms if cell[(a, q)].get("resolved")] for q in full}
     hist = collections.Counter(len(v) for v in solved.values())
-    print(f"complete matrix on {len(full)} problems; solved-by-k histogram: "
-          f"{ {k: hist.get(k, 0) for k in range(len(arms)+1)} }")
+    logger.info(f"complete matrix on {len(full)} problems; solved-by-k histogram: "
+                f"{ {k: hist.get(k, 0) for k in range(len(arms)+1)} }")
     none_ = sum(1 for v in solved.values() if not v)
     allv = sum(1 for v in solved.values() if len(v) == len(arms))
-    print(f"  solved by NO arm: {none_} ({none_/len(full)*100:.1f}%) | "
-          f"by ALL arms: {allv} ({allv/len(full)*100:.1f}%) | "
-          f"routable: {len(full)-none_-allv} ({(len(full)-none_-allv)/len(full)*100:.1f}%)")
+    logger.info(f"  solved by NO arm: {none_} ({none_/len(full)*100:.1f}%) | "
+                f"by ALL arms: {allv} ({allv/len(full)*100:.1f}%) | "
+                f"routable: {len(full)-none_-allv} ({(len(full)-none_-allv)/len(full)*100:.1f}%)")
 
     best = max(rows, key=lambda r: r["acc"])
     bcost = sum(cell[(best["arm"], q)].get("cost_usd") or 0 for q in full)
     bacc = sum(1 for q in full if cell[(best["arm"], q)].get("resolved")) / len(full)
-    print(f"\n  best single arm: {best['arm']} @ {bacc*100:.1f}%  ${bcost:.3f}")
+    logger.info(f"\n  best single arm: {best['arm']} @ {bacc*100:.1f}%  ${bcost:.3f}")
 
     # Oracle: cheapest arm that solves it; unsolvable -> cheapest arm overall.
     cheapest = rows[0]["arm"]
@@ -165,8 +168,8 @@ def cmd_analyze_phase1() -> None:
             o_res += 1
         else:
             o_cost += cell[(cheapest, q)].get("cost_usd") or 0
-    print(f"  ORACLE          : {o_res/len(full)*100:.1f}%  ${o_cost:.3f}  "
-          f"-> {bcost/o_cost:.2f}x cheaper than best arm, {(o_res/len(full)-bacc)*100:+.1f}pp")
+    logger.info(f"  ORACLE          : {o_res/len(full)*100:.1f}%  ${o_cost:.3f}  "
+                f"-> {bcost/o_cost:.2f}x cheaper than best arm, {(o_res/len(full)-bacc)*100:+.1f}pp")
 
     # Parity oracle: only downgrade problems the best arm already solves.
     p_cost = 0.0
@@ -175,8 +178,8 @@ def cmd_analyze_phase1() -> None:
             p_cost += min(cell[(a, q)].get("cost_usd") or 0 for a in solved[q])
         else:
             p_cost += cell[(best["arm"], q)].get("cost_usd") or 0
-    print(f"  PARITY ORACLE   : {bacc*100:.1f}% (identical)  ${p_cost:.3f}  "
-          f"-> {bcost/p_cost:.2f}x cheaper")
+    logger.info(f"  PARITY ORACLE   : {bacc*100:.1f}% (identical)  ${p_cost:.3f}  "
+                f"-> {bcost/p_cost:.2f}x cheaper")
 
     # Cascade: cheapest arm first, escalate to best on failure. Needs no predictor.
     c_cost = c_res = 0.0
@@ -187,10 +190,10 @@ def cmd_analyze_phase1() -> None:
         else:
             c_cost += cell[(best["arm"], q)].get("cost_usd") or 0
             c_res += int(bool(cell[(best["arm"], q)].get("resolved")))
-    print(f"  CASCADE ({cheapest} -> {best['arm']}): {c_res/len(full)*100:.1f}%  "
-          f"${c_cost:.3f}  -> {bcost/c_cost:.2f}x cheaper  <-- THE BASELINE TO BEAT")
+    logger.info(f"  CASCADE ({cheapest} -> {best['arm']}): {c_res/len(full)*100:.1f}%  "
+                f"${c_cost:.3f}  -> {bcost/c_cost:.2f}x cheaper  <-- THE BASELINE TO BEAT")
 
-    print("\n=== complementarity (cheap arm solves what a pricier arm misses) ===")
+    logger.info("\n=== complementarity (cheap arm solves what a pricier arm misses) ===")
     pairs = []
     for a, b in itertools.permutations(arms, 2):
         ra = next((r for r in rows if r["arm"] == a), None)
@@ -202,9 +205,9 @@ def cmd_analyze_phase1() -> None:
         if only:
             pairs.append((only, a, b))
     for only, a, b in sorted(pairs, reverse=True)[:8]:
-        print(f"    {a:26s} solves {only:3d} that {b:26s} misses")
+        logger.info(f"    {a:26s} solves {only:3d} that {b:26s} misses")
     if not pairs:
-        print("    none -- arms are perfectly nested, so there is nothing for a router to learn")
+        logger.info("    none -- arms are perfectly nested, so there is nothing for a router to learn")
 
 
 # ============================================================ headroom
@@ -237,7 +240,7 @@ def load_headroom_matrix(cohort_only: bool) -> tuple[list[str], list[str], dict]
         res = sum(1 for v in det.values() if v.get("resolved"))
         spend = sum(v.get("cost") or 0 for v in det.values())
         if res == 0 and spend > 1.0:
-            print(f"  EXCLUDED {s}: 0 resolved but ${spend:.0f} spent -> broken run")
+            logger.warning(f"  EXCLUDED {s}: 0 resolved but ${spend:.0f} spent -> broken run")
             continue
         keep.append(s)
     inst = sorted(set.intersection(*(set(raw[s]["details"]) for s in keep)))
@@ -276,20 +279,21 @@ def cmd_headroom() -> None:
     for cohort_only in (True, False):
         tag = ("CLEAN v2.0.0 COHORT (same scaffold, same day)" if cohort_only else
                "ALL SUBMISSIONS (scaffold varies - confounded)")
-        print(f"\n{'='*76}\n{tag}\n{'='*76}")
+        logger.info(f"\n{'='*76}\n{tag}\n{'='*76}")
         subs, inst, raw = load_headroom_matrix(cohort_only)
         rows = arm_stats(raw, subs, inst)
         n = len(inst)
-        print(f"{len(subs)} arms x {n} instances\n")
-        print(tabulate(
+        logger.info(f"{len(subs)} arms x {n} instances\n")
+        logger.info(tabulate(
             [(r["arm"][:38], f"{r['acc']*100:.1f}%", f"{r['cost']:.2f}", f"{r['cost']/n:.3f}")
              for r in rows],
             headers=["arm", "acc", "total$", "$/inst"], disable_numparse=True))
 
         best = max(rows, key=lambda r: r["acc"])
         cheapest = rows[0]
-        print(f"\n  best single arm : {best['arm']} @ {best['acc']*100:.1f}%  ${best['cost']:.2f}")
-        print(f"  cheapest arm    : {cheapest['arm']} @ {cheapest['acc']*100:.1f}%  ${cheapest['cost']:.2f}")
+        logger.info(f"\n  best single arm : {best['arm']} @ {best['acc']*100:.1f}%  ${best['cost']:.2f}")
+        logger.info(f"  cheapest arm    : {cheapest['arm']} @ {cheapest['acc']*100:.1f}%  "
+                    f"${cheapest['cost']:.2f}")
 
         # ORACLE: per instance, among arms that resolve it, take the cheapest.
         # Unsolvable instances fall back to the cheapest arm (cost still paid).
@@ -305,14 +309,14 @@ def cmd_headroom() -> None:
                 oracle_cost += min(winners)[0]
             else:
                 oracle_cost += min((det[s][i].get("cost") or 0) for s in subs)
-        print(f"\n  ORACLE routing  : {oracle_solved/n*100:.1f}%  ${oracle_cost:.2f}  "
-              f"({oracle_cost/n:.3f}/inst)")
-        print(f"  union solvable  : {solved_by_any/n*100:.1f}%  <- ceiling for ANY router")
+        logger.info(f"\n  ORACLE routing  : {oracle_solved/n*100:.1f}%  ${oracle_cost:.2f}  "
+                    f"({oracle_cost/n:.3f}/inst)")
+        logger.info(f"  union solvable  : {solved_by_any/n*100:.1f}%  <- ceiling for ANY router")
 
         # The headline: oracle vs best-single-arm.
-        print(f"\n  vs best single arm: accuracy {(oracle_solved/n - best['acc'])*100:+.1f}pp, "
-              f"cost {(1 - oracle_cost/best['cost'])*100:+.1f}% cheaper "
-              f"({best['cost']/oracle_cost:.1f}x)")
+        logger.info(f"\n  vs best single arm: accuracy {(oracle_solved/n - best['acc'])*100:+.1f}pp, "
+                    f"cost {(1 - oracle_cost/best['cost'])*100:+.1f}% cheaper "
+                    f"({best['cost']/oracle_cost:.1f}x)")
 
         # ORACLE CONSTRAINED TO PARITY: cheapest routing that matches best-arm accuracy
         # exactly, by only downgrading instances the best arm already solves.
@@ -325,22 +329,22 @@ def cmd_headroom() -> None:
             else:
                 per_inst.append(det[bs][i].get("cost") or 0)
         parity_cost = sum(per_inst)
-        print(f"  PARITY oracle   : {best['acc']*100:.1f}% (identical to best arm)  "
-              f"${parity_cost:.2f} -> {(1-parity_cost/best['cost'])*100:.1f}% cheaper "
-              f"({best['cost']/parity_cost:.1f}x)")
+        logger.info(f"  PARITY oracle   : {best['acc']*100:.1f}% (identical to best arm)  "
+                    f"${parity_cost:.2f} -> {(1-parity_cost/best['cost'])*100:.1f}% cheaper "
+                    f"({best['cost']/parity_cost:.1f}x)")
 
         if cohort_only:
             # Disagreement drives routing: if a cheap arm solves what an expensive one
             # misses, there is signal to learn. Pure dominance means nothing to learn.
-            print("\n  pairwise complementarity (cheap solves what expensive misses):")
+            logger.info("\n  pairwise complementarity (cheap solves what expensive misses):")
             for a, b in itertools.combinations(rows, 2):
                 if a["cost"] >= b["cost"]:
                     a, b = b, a
                 only_cheap = sum(1 for i in inst
                                  if det[a["sub"]][i].get("resolved") and not det[b["sub"]][i].get("resolved"))
                 if only_cheap >= 25:
-                    print(f"    {a['arm'][:30]:30s} solves {only_cheap:3d} that "
-                          f"{b['arm'][:28]:28s} misses")
+                    logger.info(f"    {a['arm'][:30]:30s} solves {only_cheap:3d} that "
+                                f"{b['arm'][:28]:28s} misses")
 
 
 # ============================================================ price-traces
@@ -375,12 +379,12 @@ def cmd_price_traces() -> None:
     total = sum(c for c, _ in priced)
     costs = sorted(c for c, _ in priced)
 
-    print(f"claude sessions priced: {n}  (skipped: {dict(skipped) or 'none'})")
-    print(f"TOTAL realized cost: ${total:,.2f}   mean ${total/n:.3f}/session")
-    print(f"per-session $: p50={costs[n//2]:.3f}  p90={costs[int(n*.9)]:.3f}  max={costs[-1]:.3f}")
+    logger.info(f"claude sessions priced: {n}  (skipped: {dict(skipped) or 'none'})")
+    logger.info(f"TOTAL realized cost: ${total:,.2f}   mean ${total/n:.3f}/session")
+    logger.info(f"per-session $: p50={costs[n//2]:.3f}  p90={costs[int(n*.9)]:.3f}  max={costs[-1]:.3f}")
     head = sum(c for c, _ in priced[:max(1, int(n * 0.2))])
-    print(f"top 20% of sessions = {head/total*100:.0f}% of all spend "
-          f"<-- routing leverage concentrates here")
+    logger.info(f"top 20% of sessions = {head/total*100:.0f}% of all spend "
+                f"<-- routing leverage concentrates here")
 
     # Correlate the free difficulty proxy against realized cost: if turn_count
     # predicts cost, it is a usable label for router supervision.
@@ -389,16 +393,16 @@ def cmd_price_traces() -> None:
     mt, mc = statistics.mean(turns), statistics.mean(cc)
     num = sum((t - mt) * (c - mc) for t, c in zip(turns, cc))
     den = (sum((t - mt) ** 2 for t in turns) * sum((c - mc) ** 2 for c in cc)) ** 0.5
-    print(f"\npearson r(turn_count, realized_cost) = {num/den:.3f}  (n={n})")
+    logger.info(f"\npearson r(turn_count, realized_cost) = {num/den:.3f}  (n={n})")
 
-    print("\nmost expensive sessions:")
+    logger.info("\nmost expensive sessions:")
     for c, r in priced[:6]:
-        print(f"  ${c:7.3f} turns={r['max_turns']:3d} out={r['out_tok']:6d} "
-              f"cache_read={r['cache_read']:9d} {r['primary_model']:18s} {r['ask'][:58]!r}")
-    print("\ncheapest sessions:")
+        logger.info(f"  ${c:7.3f} turns={r['max_turns']:3d} out={r['out_tok']:6d} "
+                    f"cache_read={r['cache_read']:9d} {r['primary_model']:18s} {r['ask'][:58]!r}")
+    logger.info("\ncheapest sessions:")
     for c, r in priced[-5:]:
-        print(f"  ${c:7.3f} turns={r['max_turns']:3d} out={r['out_tok']:6d} "
-              f"{r['primary_model']:18s} {r['ask'][:58]!r}")
+        logger.info(f"  ${c:7.3f} turns={r['max_turns']:3d} out={r['out_tok']:6d} "
+                    f"{r['primary_model']:18s} {r['ask'][:58]!r}")
 
 
 # ============================================================ extract-traces
@@ -539,13 +543,14 @@ def cmd_extract_traces() -> None:
             },
         }
     (ROOT / "results" / "trace_summary.json").write_text(json.dumps(summary, indent=1))
-    print(json.dumps(summary, indent=1))
-    print(f"\nwrote {len(rows)} sessions -> {out}")
+    logger.info(json.dumps(summary, indent=1))
+    logger.info(f"\nwrote {len(rows)} sessions -> {out}")
 
 
 if __name__ == "__main__":
     import fire
 
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
     fire.Fire({
         "analyze-phase1": cmd_analyze_phase1,
         "headroom": cmd_headroom,

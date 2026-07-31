@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import json
+import logging
 import pathlib
 import random
 import sys
@@ -28,6 +29,8 @@ from router import router_core as route  # noqa: E402
 from router.harness import load_env  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 # ============================================================ race-deepswe
 DEEPSWE_EMB = ROOT / "results" / "deepswe_embeddings.json"
@@ -48,8 +51,8 @@ def build() -> route.Matrix:
     # where dropping arms would cost 12% of it for the sake of 9 cells.
     bad = np.isnan(g).any(axis=0) | np.isnan(c).any(axis=0)
     if bad.any():
-        print(f"dropping {int(bad.sum())} tasks with missing cells: "
-              f"{[d['tasks'][j] for j in np.where(bad)[0]]}")
+        logger.info(f"dropping {int(bad.sum())} tasks with missing cells: "
+                    f"{[d['tasks'][j] for j in np.where(bad)[0]]}")
     ok = ~bad
     tasks = [q for q, k in zip(d["tasks"], ok) if k]
     g, c = g[:, ok], c[:, ok]
@@ -135,16 +138,16 @@ def cmd_race_deepswe() -> None:
     m = build()
     d = datasets.load_deepswe()
     embed(m, d["text"])
-    print(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks, {len(set(m.group))} repos (CV groups)")
+    logger.info(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks, {len(set(m.group))} repos (CV groups)")
 
     gmean = m.graded.mean(axis=1)
     total = m.cost.sum(axis=1)
     best = int(np.argmax(gmean))
     cheap = int(np.argmin(total))
     pricey = int(np.argmax(total))
-    print(f"  best graded : {m.arms[best]}  {gmean[best]:.3f}  ${total[best]:.0f}")
-    print(f"  cheapest    : {m.arms[cheap]}  {gmean[cheap]:.3f}  ${total[cheap]:.0f}")
-    print(f"  priciest    : {m.arms[pricey]}  ${total[pricey]:.0f}\n")
+    logger.info(f"  best graded : {m.arms[best]}  {gmean[best]:.3f}  ${total[best]:.0f}")
+    logger.info(f"  cheapest    : {m.arms[cheap]}  {gmean[cheap]:.3f}  ${total[cheap]:.0f}")
+    logger.info(f"  priciest    : {m.arms[pricey]}  ${total[pricey]:.0f}\n")
 
     folds = route.grouped_folds(m, n_folds=5)
     bg, bc, _ = deepswe_run(m, route.p_always(best), folds, pricey)
@@ -176,14 +179,14 @@ def cmd_race_deepswe() -> None:
                         for j in range(m.n)])
     table.append(("ORACLE (cheapest win)", f"{m.graded.max(axis=0).mean():.3f}", "",
                   f"{oc.sum():.1f}", f"{B/oc.sum():.2f}", "", f"{o_pricey*100:.1f}%"))
-    print(tabulate(table, headers=["policy", "graded", "vs base", "cost$", "x cheap",
-                                    "95% CI", "->pricey"], disable_numparse=True))
+    logger.info(tabulate(table, headers=["policy", "graded", "vs base", "cost$", "x cheap",
+                                          "95% CI", "->pricey"], disable_numparse=True))
 
     # Give the cascade its strongest form before claiming kNN beats it. Picking the first
     # rung as argmin(cost) chose the worst arm in the pool (graded 0.370), which is a straw
     # man -- the earlier lesson was that this pool is NOT ordered by price, so the rung has
     # to be chosen on measured value. Sweep every arm as the first rung and report the best.
-    print("\n  tuned cascade -- best first rung over all 50 arms:")
+    logger.info("\n  tuned cascade -- best first rung over all 50 arms:")
     tuned = []
     for i in range(len(m.arms)):
         if i == best:
@@ -192,20 +195,20 @@ def cmd_race_deepswe() -> None:
         tuned.append((B / c.sum(), g.mean(), m.arms[i]))
     tuned.sort(reverse=True)
     for r, gm, nm in tuned[:4]:
-        print(f"    {nm:46s} {r:5.2f}x at graded {gm:.3f}")
+        logger.info(f"    {nm:46s} {r:5.2f}x at graded {gm:.3f}")
     bestc = tuned[0]
-    print(f"  -> BEST TUNED CASCADE: {bestc[2]} = {bestc[0]:.2f}x at graded {bestc[1]:.3f}")
+    logger.info(f"  -> BEST TUNED CASCADE: {bestc[2]} = {bestc[0]:.2f}x at graded {bestc[1]:.3f}")
 
     casc = next(r for r in rows if r[0].startswith("CASCADE"))
     knn = [r for r in rows if r[0].startswith("knn")]
     beat = [r for r in knn if r[1] >= casc[1] - 0.01 and r[3] > casc[3]]
-    print(f"\n  cascade: {casc[3]:.2f}x cheaper at graded {casc[1]:.3f}")
+    logger.info(f"\n  cascade: {casc[3]:.2f}x cheaper at graded {casc[1]:.3f}")
     if beat:
         b = max(beat, key=lambda r: r[3])
-        print(f"  kNN BEATS IT: {b[0]} -> {b[3]:.2f}x at graded {b[1]:.3f} "
-              f"(CI [{b[4]:.2f},{b[5]:.2f}]) = {b[3]/casc[3]:.2f}x relative")
+        logger.info(f"  kNN BEATS IT: {b[0]} -> {b[3]:.2f}x at graded {b[1]:.3f} "
+                    f"(CI [{b[4]:.2f},{b[5]:.2f}]) = {b[3]/casc[3]:.2f}x relative")
     else:
-        print("  no kNN variant beats the cascade at matched graded score.")
+        logger.info("  no kNN variant beats the cascade at matched graded score.")
 
 
 # ============================================================ holdout-deepswe
@@ -263,7 +266,7 @@ def cmd_holdout_deepswe() -> None:
                      resolved=full.resolved[keep], graded=full.graded[keep],
                      cost=full.cost[keep], difficulty=full.difficulty,
                      group=full.group, emb=full.emb)
-    print(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks x {len(set(m.group))} repos\n")
+    logger.info(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks x {len(set(m.group))} repos\n")
 
     ratios, deltas, table = [], [], []
     for seed in range(6):
@@ -321,15 +324,15 @@ def cmd_holdout_deepswe() -> None:
                       f"{gr.mean()-bg.mean():+.3f}", f"{bc.sum()/co.sum():.2f}",
                       f"[{lo:.2f},{hi:.2f}]"))
 
-    print(tabulate(table, headers=["seed", "tr/te tasks", "tr/te repos", "(k,tau)", "base",
-                                    "knn", "delta", "x cheap", "95% CI"], disable_numparse=True))
-    print(f"\n  across 6 splits: cost ratio median {np.median(ratios):.2f} "
-          f"(min {min(ratios):.2f}, max {max(ratios):.2f})")
-    print(f"                   graded delta median {np.median(deltas):+.3f} "
-          f"(min {min(deltas):+.3f}, max {max(deltas):+.3f})")
-    print(f"\n  For comparison, nested CV over all {m.n} tasks gave 2.15x, "
-          f"delta -0.021, CI [1.87,2.46].")
-    print("  The spread above is the cost of a single 20% holdout at this n.")
+    logger.info(tabulate(table, headers=["seed", "tr/te tasks", "tr/te repos", "(k,tau)", "base",
+                                          "knn", "delta", "x cheap", "95% CI"], disable_numparse=True))
+    logger.info(f"\n  across 6 splits: cost ratio median {np.median(ratios):.2f} "
+                f"(min {min(ratios):.2f}, max {max(ratios):.2f})")
+    logger.info(f"                   graded delta median {np.median(deltas):+.3f} "
+                f"(min {min(deltas):+.3f}, max {max(deltas):+.3f})")
+    logger.info(f"\n  For comparison, nested CV over all {m.n} tasks gave 2.15x, "
+                f"delta -0.021, CI [1.87,2.46].")
+    logger.info("  The spread above is the cost of a single 20% holdout at this n.")
 
 
 # ============================================================ exp1-holdout9
@@ -408,9 +411,9 @@ def cmd_exp1_holdout9() -> None:
                      emb=full.emb)
     g = m.graded.mean(axis=1)
     tot = m.cost.sum(axis=1)
-    print(f"EXP 1 -- 9 arms x {m.n} tasks x {len(set(m.group))} repos\n")
+    logger.info(f"EXP 1 -- 9 arms x {m.n} tasks x {len(set(m.group))} repos\n")
     for i in np.argsort(tot):
-        print(f"  {m.arms[i]:24s} graded {g[i]:.3f}  ${tot[i]/m.n:5.2f}/task")
+        logger.info(f"  {m.arms[i]:24s} graded {g[i]:.3f}  ${tot[i]/m.n:5.2f}/task")
 
     rows, table = [], []
     for seed in EXP1_SEEDS:
@@ -452,19 +455,19 @@ def cmd_exp1_holdout9() -> None:
                       f"{gr.mean()-bg.mean():+.3f}", f"{bc.sum()/co.sum():.2f}",
                       f"[{lo:.2f},{hi:.2f}]"))
 
-    print()
-    print(tabulate(table, headers=["seed", "tr/te", "repos", "(k,tau)", "base", "knn",
-                                    "delta", "x cheap", "95% CI"], disable_numparse=True))
+    logger.info("")
+    logger.info(tabulate(table, headers=["seed", "tr/te", "repos", "(k,tau)", "base", "knn",
+                                          "delta", "x cheap", "95% CI"], disable_numparse=True))
     R = [r["ratio"] for r in rows]
     Dl = [r["delta"] for r in rows]
-    print(f"\n  HEADLINE across {len(EXP1_SEEDS)} seeds:")
-    print(f"    cost ratio   median {np.median(R):.2f}x   range {min(R):.2f}-{max(R):.2f}")
-    print(f"    graded delta median {np.median(Dl):+.3f}   range {min(Dl):+.3f} to {max(Dl):+.3f}")
+    logger.info(f"\n  HEADLINE across {len(EXP1_SEEDS)} seeds:")
+    logger.info(f"    cost ratio   median {np.median(R):.2f}x   range {min(R):.2f}-{max(R):.2f}")
+    logger.info(f"    graded delta median {np.median(Dl):+.3f}   range {min(Dl):+.3f} to {max(Dl):+.3f}")
     (ROOT / "results" / "exp1_holdout9.json").write_text(json.dumps(
         {"arms": m.arms, "n_tasks": int(m.n), "n_repos": len(set(m.group)),
          "seeds": rows, "median_ratio": float(np.median(R)),
          "median_delta": float(np.median(Dl))}, indent=1))
-    print("    -> results/exp1_holdout9.json")
+    logger.info("    -> results/exp1_holdout9.json")
 
 
 # ============================================================ race-router
@@ -476,22 +479,22 @@ def cmd_race_router() -> None:
     """
     load_env()
     m = route.load_matrix()
-    print(f"matrix: {len(m.arms)} arms x {m.n} problems, "
-          f"{len(set(m.group))} contests (CV grouping unit)")
+    logger.info(f"matrix: {len(m.arms)} arms x {m.n} problems, "
+                f"{len(set(m.group))} contests (CV grouping unit)")
 
     acc = m.resolved.mean(axis=1)
     med = np.median(m.cost, axis=1)
     best = int(np.argmax(acc))
     cheap = int(np.argmin(med))
-    print(f"  best arm   : {m.arms[best]}  {acc[best]*100:.1f}%")
-    print(f"  cheapest   : {m.arms[cheap]}  {acc[cheap]*100:.1f}%")
+    logger.info(f"  best arm   : {m.arms[best]}  {acc[best]*100:.1f}%")
+    logger.info(f"  cheapest   : {m.arms[cheap]}  {acc[cheap]*100:.1f}%")
 
     probs = {p.qid: p for p in sandbox.load()}
     route.attach_embeddings(m, {q: probs[q].statement for q in m.qids if q in probs})
-    print(f"  embeddings : {m.emb.shape}")
+    logger.info(f"  embeddings : {m.emb.shape}")
 
     folds = route.grouped_folds(m, n_folds=5)
-    print(f"  folds      : {[len(f) for f in folds]}\n")
+    logger.info(f"  folds      : {[len(f) for f in folds]}\n")
 
     base_res, base_cost = route.run_policy(m, route.p_always(best), folds)
     B = base_cost.sum()
@@ -524,22 +527,22 @@ def cmd_race_router() -> None:
         table.append((label, f"{r.mean()*100:.1f}%", f"{(r.mean()-base_res.mean())*100:+.1f}",
                       f"{c.sum():.3f}", f"{B/c.sum():.2f}", "", "(ceiling)"))
 
-    print(tabulate(table, headers=["policy", "acc", "vs base", "cost$", "x cheaper",
-                                    "95% CI", "McNemar"], disable_numparse=True))
+    logger.info(tabulate(table, headers=["policy", "acc", "vs base", "cost$", "x cheaper",
+                                          "95% CI", "McNemar"], disable_numparse=True))
 
     casc = next(x for x in rows if x[0].startswith("CASCADE"))
     learned = [x for x in rows if x[0].startswith("knn")]
     # "Matched accuracy" = accuracy not detectably worse than the cascade's.
     ok = [x for x in learned if x[1] >= casc[1] - 0.02 and x[3] > casc[3]]
-    print(f"\n  cascade: {casc[3]:.2f}x at {casc[1]*100:.1f}%")
+    logger.info(f"\n  cascade: {casc[3]:.2f}x at {casc[1]*100:.1f}%")
     if ok:
         b = max(ok, key=lambda x: x[3])
-        print(f"  BEST LEARNED THAT BEATS IT: {b[0]} -> {b[3]:.2f}x at {b[1]*100:.1f}% "
-              f"(CI [{b[4]:.2f},{b[5]:.2f}])")
-        print(f"  relative gain over cascade: {b[3]/casc[3]:.2f}x")
+        logger.info(f"  BEST LEARNED THAT BEATS IT: {b[0]} -> {b[3]:.2f}x at {b[1]*100:.1f}% "
+                    f"(CI [{b[4]:.2f},{b[5]:.2f}])")
+        logger.info(f"  relative gain over cascade: {b[3]/casc[3]:.2f}x")
     else:
-        print("  NO learned policy beats the cascade at matched accuracy on this data.")
-        print("  -> Per the stated decision rule, the cascade is what ships.")
+        logger.info("  NO learned policy beats the cascade at matched accuracy on this data.")
+        logger.info("  -> Per the stated decision rule, the cascade is what ships.")
 
 
 # ============================================================ probe-arms
@@ -683,19 +686,23 @@ def cmd_probe_arms() -> None:
             flag = "OK " if res["ok"] else "ERR"
             extra = (f"tool={res['tool_called']} out={res['out_tok']}tok {res['latency_s']}s"
                      if res["ok"] else f"{res['error_type']}: {res['error'][:150]}")
-            print(f"{flag} {label:44s} {extra}", flush=True)
+            logger.info(f"{flag} {label:44s} {extra}")
 
     dest = ROOT / "results" / "arm_probe.json"
     dest.parent.mkdir(exist_ok=True)
     dest.write_text(json.dumps(out, indent=1))
     n_ok = sum(1 for v in out.values() if v["ok"])
     n_tool = sum(1 for v in out.values() if v["ok"] and v.get("tool_called"))
-    print(f"\n{n_ok}/{len(out)} arms accepted; {n_tool} emitted a tool call -> {dest}")
+    logger.info(f"\n{n_ok}/{len(out)} arms accepted; {n_tool} emitted a tool call -> {dest}")
 
 
 if __name__ == "__main__":
     import fire
 
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+    # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
+    # OpenAI/Anthropic SDKs' HTTP layer); print never showed them, so gate them out.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     fire.Fire({
         "holdout-deepswe": cmd_holdout_deepswe,
         "exp1-holdout9": cmd_exp1_holdout9,

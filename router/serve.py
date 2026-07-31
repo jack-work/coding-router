@@ -12,6 +12,7 @@ import collections
 import getpass
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import sys
@@ -29,11 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from router.harness import load_env
 from router.router_core import Decision, Router
 
-sys.stdout.reconfigure(line_buffering=True)  # status/routing logs show up live, not on exit
-
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.local"
 DISPATCH_MAX_TOKENS = 32_000
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------- Chat Completions shapes
@@ -178,13 +179,13 @@ def ensure_key(env_var: str, dashboard_url: str, validate) -> str:
     if key:
         return key
 
-    print(f"No {env_var} found (checked environment and .env.local).")
-    print(f"Get one at {dashboard_url}")
+    logger.info(f"No {env_var} found (checked environment and .env.local).")
+    logger.info(f"Get one at {dashboard_url}")
     key = getpass.getpass(f"Paste your {env_var} (input hidden): ").strip()
     if not key:
         raise SystemExit("no key provided, exiting")
 
-    print("validating key ...")
+    logger.info("validating key ...")
     try:
         validate(key)
     except Exception as e:  # noqa: BLE001 — surface the real reason a pasted key failed
@@ -195,7 +196,7 @@ def ensure_key(env_var: str, dashboard_url: str, validate) -> str:
     lines = [ln for ln in existing.splitlines() if not ln.startswith(f"{env_var}=")]
     lines.append(f"{env_var}={key}")
     ENV_FILE.write_text("\n".join(lines) + "\n")
-    print(f"saved to {ENV_FILE}\n")
+    logger.info(f"saved to {ENV_FILE}\n")
     return key
 
 
@@ -458,10 +459,10 @@ def summarize_segment(text: str, client: openai.OpenAI, model: str) -> str:
                   "progress: what was attempted, key files/commands/errors, and current "
                   "blockers. No preamble.\n\n" + text)
         out = (r.output_text or "").strip() or text[:600]
-        print(f"trajectory: summarized segment {key} ({len(text)} -> {len(out)} chars)")
+        logger.info(f"trajectory: summarized segment {key} ({len(text)} -> {len(out)} chars)")
     except Exception as e:  # noqa: BLE001 -- routing must degrade, never block dispatch
         out = text[:600]
-        print(f"trajectory: summarizer failed on {key} ({type(e).__name__}); using head slice")
+        logger.warning(f"trajectory: summarizer failed on {key} ({type(e).__name__}); using head slice")
     _summary_cache[key] = out
     if len(_summary_cache) > SUMMARY_CACHE_CAP:
         _summary_cache.popitem(last=False)
@@ -594,9 +595,9 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
-        print(f"routed -> {decision.model}@{decision.effort or 'default'}  "
-              f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
-              f"({len(messages)} messages in, traj={len(trajectory)}ch)")
+        logger.info(f"routed -> {decision.model}@{decision.effort or 'default'}  "
+                    f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
+                    f"({len(messages)} messages in, traj={len(trajectory)}ch)")
         finish_reason = "tool_calls" if message.tool_calls else "stop"
 
         if not stream:
@@ -629,8 +630,8 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
 
 def print_opencode_config(port: int) -> None:
     """Print a ready-to-paste opencode.jsonc provider block for this server."""
-    print("opencode config (opencode.jsonc):")
-    print(json.dumps({
+    logger.info("opencode config (opencode.jsonc):")
+    logger.info(json.dumps({
         "$schema": "https://opencode.ai/config.json",
         "provider": {"local-router": {
             "npm": "@ai-sdk/openai-compatible", "name": "Local Router (per-turn)",
@@ -661,6 +662,10 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
             back to embedding just the task anchor + most recent messages.
         summary_model: Model used for those summaries.
     """
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+    # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
+    # OpenAI/Anthropic SDKs' HTTP layer); print never showed them, so gate them out.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     openai_key = ensure_key("OPENAI_API_KEY", "https://platform.openai.com/api-keys",
                             lambda k: openai.OpenAI(api_key=k).models.list())
     openai_client = openai.OpenAI(api_key=openai_key)
@@ -681,12 +686,12 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
     router = Router(artifact_dir or str(ROOT / "results"))
     app = make_app(router, openai_client, anthropic_client, openrouter_client,
                    summary_model=summary_model, summarize_middle=summarize)
-    print(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}, "
-          f"summarize={summarize}")
+    logger.info(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}, "
+                f"summarize={summarize}")
 
-    print(f"\nrouter serving at http://127.0.0.1:{port}/v1")
+    logger.info(f"\nrouter serving at http://127.0.0.1:{port}/v1")
     print_opencode_config(port)
-    print()
+    logger.info("")
 
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=port)

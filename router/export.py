@@ -5,6 +5,7 @@ shipping a router that behaves differently from the one that was measured.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import re
 import sys
@@ -38,6 +39,8 @@ NO_EFFORT = {"claude-haiku-4-5"}
 # results/deepswe_embeddings_local.json already covers all 113 DeepSWE tasks.
 LOCAL_EMBED_MODEL = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
 LOCAL_EMBED_BASE_URL = "http://127.0.0.1:8081/v1"
+
+logger = logging.getLogger(__name__)
 
 
 def arm_to_spec(arm: str) -> ArmSpec:
@@ -147,7 +150,7 @@ def cmd_export_router(local: bool = False) -> None:
     np.savez_compressed(OUT / npz_name, emb=full.emb.astype(np.float32),
                         resolved=resolved, med_cost=med)
     sz = sum((OUT / f).stat().st_size for f in (json_name, npz_name))
-    print(f"wrote results/{json_name.replace('.json','')}.{{json,npz}}  ({sz/1024:.0f} KB total)")
+    logger.info(f"wrote results/{json_name.replace('.json','')}.{{json,npz}}  ({sz/1024:.0f} KB total)")
 
     # ---- self-test: does the ARTIFACT reproduce the measured experiment? ----
     m = route.Matrix(arms=arms, qids=full.qids, resolved=resolved, graded=graded,
@@ -173,14 +176,14 @@ def cmd_export_router(local: bool = False) -> None:
             gr[j] = graded[i, j]
     bg = graded[fallback].mean()
     bc = cost[fallback].sum()
-    print("\nself-test (artifact re-run under the same repo-grouped folds):")
-    print(f"  baseline always-{arms[fallback]}: graded {bg:.3f}  ${bc:.1f}")
-    print(f"  exported router                 : graded {gr.mean():.3f}  ${co.sum():.1f}  "
-          f"{bc/co.sum():.2f}x")
-    print(f"  off-distribution escalations    : {off}/{m.n}")
+    logger.info("\nself-test (artifact re-run under the same repo-grouped folds):")
+    logger.info(f"  baseline always-{arms[fallback]}: graded {bg:.3f}  ${bc:.1f}")
+    logger.info(f"  exported router                 : graded {gr.mean():.3f}  ${co.sum():.1f}  "
+                f"{bc/co.sum():.2f}x")
+    logger.info(f"  off-distribution escalations    : {off}/{m.n}")
     assert bc / co.sum() > 1.5, "exported router lost its cost advantage"
     assert gr.mean() > bg - 0.05, "exported router lost too much quality"
-    print("  OK -- artifact behaves like the measured experiment")
+    logger.info("  OK -- artifact behaves like the measured experiment")
 
 
 def main(local: bool = False) -> None:
@@ -191,4 +194,8 @@ def main(local: bool = False) -> None:
 if __name__ == "__main__":
     import fire
 
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+    # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
+    # OpenAI/Anthropic SDKs' HTTP layer); print never showed them, so gate them out.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     fire.Fire(main)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
+import logging
 import os
 import pathlib
 import pickle
@@ -31,6 +32,8 @@ from router.router_core import Arm  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_PATH = ROOT / "data" / "lcb_test6.jsonl"
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================ llm
@@ -689,19 +692,20 @@ def task_prompt(p: Problem) -> str:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
     t0 = time.time()
     probs = load()
     by_diff: dict[str, int] = {}
     for p in probs:
         by_diff[p.difficulty] = by_diff.get(p.difficulty, 0) + 1
-    print(f"loaded {len(probs)} stdin problems in {time.time()-t0:.1f}s  {by_diff}")
+    logger.info(f"loaded {len(probs)} stdin problems in {time.time()-t0:.1f}s  {by_diff}")
     tests = sorted(p.n_tests for p in probs)
-    print(f"private tests/problem: min={tests[0]} p50={tests[len(tests)//2]} max={tests[-1]}")
+    logger.info(f"private tests/problem: min={tests[0]} p50={tests[len(tests)//2]} max={tests[-1]}")
 
     # Timing floor: how long does grading a KNOWN-GOOD solution take?
     p = probs[0]
-    print(f"\nsample: {p.qid} [{p.difficulty}] {p.title!r} "
-          f"pub={len(p.public_tests)} prv={len(p.private_tests)}")
+    logger.info(f"\nsample: {p.qid} [{p.difficulty}] {p.title!r} "
+                f"pub={len(p.public_tests)} prv={len(p.private_tests)}")
     t0 = time.time()
     ok, tot, _ = grade("import sys\nprint(sys.stdin.read().strip())", p.private_tests[:10])
-    print(f"grading 10 private tests took {time.time()-t0:.2f}s ({ok}/{tot} passed by a stub)")
+    logger.info(f"grading 10 private tests took {time.time()-t0:.2f}s ({ok}/{tot} passed by a stub)")

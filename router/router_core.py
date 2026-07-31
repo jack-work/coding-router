@@ -10,10 +10,12 @@ import collections
 import dataclasses
 import glob
 import json
+import logging
 import math
 import pathlib
 import random
 import re
+import sys
 from typing import Any
 
 import numpy as np
@@ -27,6 +29,8 @@ PRICE_FETCH_DATE = "2026-07-28"
 ARTIFACT_JSON = "router_v0.json"
 ARTIFACT_NPZ = "router_v0.npz"
 EMBED_MODEL = "text-embedding-3-large"
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================ pricing
@@ -171,15 +175,15 @@ def main_pricing() -> None:
     """CLI (`arms`): print the validated arm count, cost span, and per-episode cost ladder."""
     arms = all_validated_arms()
     lo, hi = cost_span()
-    print(f"{len(arms)} validated arms | blended $/1M span: {lo:.2f} -> {hi:.2f} ({hi/lo:.0f}x)")
+    logger.info(f"{len(arms)} validated arms | blended $/1M span: {lo:.2f} -> {hi:.2f} ({hi/lo:.0f}x)")
     # Cost of a representative agentic episode: 40 turns, heavy cache reuse.
     ep = dict(inp=30_000, cache_read=1_200_000, cache_write=40_000, out=25_000)
     rows = sorted({a.model: a for a in arms}.values(), key=lambda a: a.cost(**ep))
-    print(f"\nper-episode cost @ {ep}:")
-    print(tabulate([(a.model, f"${a.cost(**ep):.3f}") for a in rows], headers=["model", "cost"],
-                   disable_numparse=True))
+    logger.info(f"\nper-episode cost @ {ep}:")
+    logger.info(tabulate([(a.model, f"${a.cost(**ep):.3f}") for a in rows], headers=["model", "cost"],
+                         disable_numparse=True))
     c = rows[0].cost(**ep)
-    print(f"\nspread cheapest->priciest per episode: {rows[-1].cost(**ep)/c:.1f}x")
+    logger.info(f"\nspread cheapest->priciest per episode: {rows[-1].cost(**ep)/c:.1f}x")
 
 
 # ============================================================================ predict
@@ -368,16 +372,16 @@ def main_predict(artifact_dir: str = "results") -> None:
             break
 
     r = Router(artifact_dir)
-    print(f"loaded: {len(r.arms)} arms, {r.emb.shape[0]} labelled tasks, "
-          f"k={r.k} tau={r.tau} sim_floor={r.sim_floor}")
-    print(f"provenance: {r.meta['provenance']}")
+    logger.info(f"loaded: {len(r.arms)} arms, {r.emb.shape[0]} labelled tasks, "
+                f"k={r.k} tau={r.tau} sim_floor={r.sim_floor}")
+    logger.info(f"provenance: {r.meta['provenance']}")
     demo = ("Fix a race condition in the connection pool so concurrent checkouts "
             "cannot hand the same connection to two callers.")
     d = r.route(demo)
-    print(f"\nrouted -> {d.model} effort={d.effort}  p_solve={d.p_solve:.2f} "
-          f"est ${d.est_cost_usd:.2f}  nearest_sim={d.nearest_sim:.3f} "
-          f"off_dist={d.off_distribution} fallback={d.fallback_used}")
-    print(f"request_kwargs = {d.request_kwargs}")
+    logger.info(f"\nrouted -> {d.model} effort={d.effort}  p_solve={d.p_solve:.2f} "
+                f"est ${d.est_cost_usd:.2f}  nearest_sim={d.nearest_sim:.3f} "
+                f"off_dist={d.off_distribution} fallback={d.fallback_used}")
+    logger.info(f"request_kwargs = {d.request_kwargs}")
 
 
 # ============================================================================ route
@@ -751,4 +755,8 @@ def mcnemar(a: np.ndarray, b: np.ndarray) -> float:
 if __name__ == "__main__":
     import fire
 
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+    # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
+    # OpenAI/Anthropic SDKs' HTTP layer); print never showed them, so gate them out.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     fire.Fire({"arms": main_pricing, "demo": main_predict})

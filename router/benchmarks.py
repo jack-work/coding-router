@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures as cf
 import json
+import logging
 import pathlib
 import shutil
 import statistics
@@ -30,6 +31,8 @@ from router.harness import AgentRunner, Tool, load_env  # noqa: E402
 from router.router_core import Arm  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 # ============================================================ fetch-swebench-matrix
 # Every submission under evaluation/bash-only ran the SAME mini-swe-agent bash-only
@@ -102,28 +105,29 @@ def cmd_fetch_swebench_matrix() -> None:
     """CLI (`fetch-swebench-matrix`): download every bash-only submission and write the matrix."""
     dirs = [d["name"] for d in gh_json(f"repos/{SWEBENCH_REPO}/contents/{SWEBENCH_BASE}")
             if d["type"] == "dir"]
-    print(f"{len(dirs)} submissions found")
+    logger.info(f"{len(dirs)} submissions found")
 
     out: dict[str, dict] = {}
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
         for name, payload in ex.map(fetch_submission, dirs):
             if payload is None or "error" in payload:
-                print(f"  SKIP {name}: {payload and payload.get('error')}")
+                logger.warning(f"  SKIP {name}: {payload and payload.get('error')}")
                 continue
             det = payload["details"]
             n = len(det)
             res = sum(1 for v in det.values() if v.get("resolved"))
             costs = [v.get("cost") or 0 for v in det.values()]
             out[name] = payload
-            print(f"  {name:52s} n={n:4d} resolved={res:3d} ({res/n*100:5.1f}%) "
-                  f"cost=${sum(costs):7.2f} mean=${sum(costs)/n:.3f}")
+            logger.info(f"  {name:52s} n={n:4d} resolved={res:3d} ({res/n*100:5.1f}%) "
+                        f"cost=${sum(costs):7.2f} mean=${sum(costs)/n:.3f}")
 
     dest = ROOT / "results" / "swebench_matrix.json"
     dest.parent.mkdir(exist_ok=True)
     dest.write_text(json.dumps(out))
     inst = {i for p in out.values() for i in p["details"]}
-    print(f"\n{len(out)} submissions x {len(inst)} instances -> {dest}")
-    print(f"total (model, instance) cells available FREE: {sum(len(p['details']) for p in out.values()):,}")
+    logger.info(f"\n{len(out)} submissions x {len(inst)} instances -> {dest}")
+    logger.info(f"total (model, instance) cells available FREE: "
+                f"{sum(len(p['details']) for p in out.values()):,}")
 
 
 # ============================================================ transfer-swebench
@@ -157,7 +161,7 @@ def build() -> route.Matrix:
         res = sum(1 for v in det.values() if v.get("resolved"))
         spend = sum(v.get("cost") or 0 for v in det.values())
         if res == 0 and spend > 1.0:
-            print(f"  excluded broken submission {s}")
+            logger.warning(f"  excluded broken submission {s}")
             continue
         keep.append(s)
     inst = sorted(set.intersection(*(set(raw[s]["details"]) for s in keep)))
@@ -204,19 +208,19 @@ def cmd_transfer_swebench() -> None:
     load_env()
     m = build()
     embed(m)
-    print(f"SWE-bench bash-only: {len(m.arms)} arms x {m.n} instances, "
-          f"{len(set(m.group))} repos")
+    logger.info(f"SWE-bench bash-only: {len(m.arms)} arms x {m.n} instances, "
+                f"{len(set(m.group))} repos")
     acc = m.resolved.mean(axis=1)
     tot = m.cost.sum(axis=1)
     best = int(np.argmax(acc))
-    print(f"  best arm: {m.arms[best]}  {acc[best]*100:.1f}%  ${tot[best]:.0f}")
+    logger.info(f"  best arm: {m.arms[best]}  {acc[best]*100:.1f}%  ${tot[best]:.0f}")
     # The honest bar is the best STATIC arm on the cost-quality frontier, not the priciest.
     front = [i for i in range(len(m.arms))
              if not any(tot[o] < tot[i] and acc[o] >= acc[i] for o in range(len(m.arms)))]
-    print(f"  static frontier has {len(front)} arms; cheapest-at->=90%-of-best: ", end="")
     cand = [i for i in front if acc[i] >= 0.9 * acc[best]]
     ref = min(cand, key=lambda i: tot[i]) if cand else best
-    print(f"{m.arms[ref]} {acc[ref]*100:.1f}% ${tot[ref]:.0f}")
+    logger.info(f"  static frontier has {len(front)} arms; cheapest-at->=90%-of-best: "
+                f"{m.arms[ref]} {acc[ref]*100:.1f}% ${tot[ref]:.0f}")
 
     folds = route.grouped_folds(m, n_folds=5, seed=0)
     br, bc = route.run_policy(m, route.p_always(best), folds)
@@ -236,9 +240,9 @@ def cmd_transfer_swebench() -> None:
     orr, oc = route.oracle(m)
     rows.append(("ORACLE", f"{orr.mean()*100:.1f}%", f"{(orr.mean()-br.mean())*100:+.1f}",
                  f"{oc.sum():.1f}", f"{B/oc.sum():.2f}", "(ceiling)"))
-    print()
-    print(tabulate(rows, headers=["policy", "acc", "delta", "cost$", "x cheap", "95% CI"],
-                   disable_numparse=True))
+    logger.info("")
+    logger.info(tabulate(rows, headers=["policy", "acc", "delta", "cost$", "x cheap", "95% CI"],
+                         disable_numparse=True))
 
 
 # ============================================================ run-lcb
@@ -421,8 +425,8 @@ def cmd_run_lcb(arms: str = "cheap", n: int = 6, workers: int = 8, max_turns: in
         picked += [p for p in probs if p.difficulty == band][:n]
     arm_list = ARM_SETS[arms]
     jobs = [(p, arm, max_turns) for p in picked for arm in arm_list]
-    print(f"{len(picked)} problems x {len(arm_list)} arms = {len(jobs)} episodes, "
-          f"{workers} workers")
+    logger.info(f"{len(picked)} problems x {len(arm_list)} arms = {len(jobs)} episodes, "
+                f"{workers} workers")
 
     t0 = time.time()
     recs = []
@@ -431,15 +435,15 @@ def cmd_run_lcb(arms: str = "cheap", n: int = 6, workers: int = 8, max_turns: in
             recs.append(rec)
             flag = "cache" if rec.get("cached") else ("ERR " if rec.get("harness_error") else
                                                      ("PASS" if rec["resolved"] else "fail"))
-            print(f"[{i:3d}/{len(jobs)}] {flag} {rec['qid']:12s} {rec['difficulty']:6s} "
-                  f"{rec['arm']:26s} {rec.get('passed','?')}/{rec.get('total','?')} "
-                  f"turns={rec.get('turns','?'):>3} ${rec.get('cost_usd',0):.4f} "
-                  f"{rec.get('total_wall_s',0):5.1f}s", flush=True)
+            logger.info(f"[{i:3d}/{len(jobs)}] {flag} {rec['qid']:12s} {rec['difficulty']:6s} "
+                        f"{rec['arm']:26s} {rec.get('passed','?')}/{rec.get('total','?')} "
+                        f"turns={rec.get('turns','?'):>3} ${rec.get('cost_usd',0):.4f} "
+                        f"{rec.get('total_wall_s',0):5.1f}s")
     wall = time.time() - t0
 
     fresh = [r for r in recs if not r.get("cached")]
-    print(f"\n=== {len(jobs)} episodes in {wall:.1f}s wall "
-          f"({len(fresh)} fresh) ===")
+    logger.info(f"\n=== {len(jobs)} episodes in {wall:.1f}s wall "
+                f"({len(fresh)} fresh) ===")
     for arm in arm_list:
         rs = [r for r in recs if r["arm"] == arm.id]
         if not rs:
@@ -454,18 +458,18 @@ def cmd_run_lcb(arms: str = "cheap", n: int = 6, workers: int = 8, max_turns: in
         cap = sum(1 for r in rs if r.get("stop") == "max_tokens")
         turnlim = sum(1 for r in rs if r.get("stop") == "max_turns")
         nosol = sum(1 for r in rs if not r.get("wrote_solution", True))
-        print(f"  {arm.id:26s} {res}/{len(rs)} resolved  ${cost:.4f}  "
-              f"median {med:5.1f}s/episode")
-        print(f"      cap_hit={cap} turn_limit={turnlim} no_solution={nosol} "
-              f"harness_errors={errs}")
+        logger.info(f"  {arm.id:26s} {res}/{len(rs)} resolved  ${cost:.4f}  "
+                    f"median {med:5.1f}s/episode")
+        logger.info(f"      cap_hit={cap} turn_limit={turnlim} no_solution={nosol} "
+                    f"harness_errors={errs}")
         for band in ("easy", "medium", "hard"):
             b = [r for r in rs if r["difficulty"] == band]
             if b:
-                print(f"      {band:6s} {sum(1 for r in b if r['resolved'])}/{len(b)}")
+                logger.info(f"      {band:6s} {sum(1 for r in b if r['resolved'])}/{len(b)}")
     if fresh:
         allw = sorted(r["total_wall_s"] for r in fresh)
-        print(f"\n  episode wall-clock: p50={allw[len(allw)//2]:.1f}s "
-              f"p90={allw[int(len(allw)*.9)]:.1f}s max={allw[-1]:.1f}s")
+        logger.info(f"\n  episode wall-clock: p50={allw[len(allw)//2]:.1f}s "
+                    f"p90={allw[int(len(allw)*.9)]:.1f}s max={allw[-1]:.1f}s")
 
 
 # ============================================================ smoke-agent
@@ -564,17 +568,17 @@ def cmd_smoke_agent() -> None:
                                  max_tokens=4000)
             res = runner.run(SMOKE_TASK)
             passed = verify(work)
-            print(f"\n=== {arm.id}")
-            print(f"  resolved      : {passed}")
-            print(f"  stop / turns  : {res.stop} / {res.turns}")
-            print(f"  usage         : in={res.usage.inp} cache_r={res.usage.cache_read} "
-                  f"cache_w={res.usage.cache_write} out={res.usage.out} "
-                  f"reasoning={res.usage.reasoning} reqs={res.usage.requests}")
-            print(f"  cost / wall   : ${res.cost_usd:.5f} / {res.wall_s}s")
+            logger.info(f"\n=== {arm.id}")
+            logger.info(f"  resolved      : {passed}")
+            logger.info(f"  stop / turns  : {res.stop} / {res.turns}")
+            logger.info(f"  usage         : in={res.usage.inp} cache_r={res.usage.cache_read} "
+                        f"cache_w={res.usage.cache_write} out={res.usage.out} "
+                        f"reasoning={res.usage.reasoning} reqs={res.usage.requests}")
+            logger.info(f"  cost / wall   : ${res.cost_usd:.5f} / {res.wall_s}s")
             if res.error:
-                print(f"  ERROR         : {res.error}")
+                logger.warning(f"  ERROR         : {res.error}")
             tools_used = sum(len(t.calls) for t in res.transcript)
-            print(f"  tool calls    : {tools_used}")
+            logger.info(f"  tool calls    : {tools_used}")
             assert res.usage.requests >= 1, "no requests recorded"
             assert tools_used >= 1, "agent never called a tool"
         finally:
@@ -584,6 +588,10 @@ def cmd_smoke_agent() -> None:
 if __name__ == "__main__":
     import fire
 
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+    # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
+    # OpenAI/Anthropic SDKs' HTTP layer); print never showed them, so gate them out.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     fire.Fire({
         "fetch-swebench-matrix": cmd_fetch_swebench_matrix,
         "transfer-swebench": cmd_transfer_swebench,

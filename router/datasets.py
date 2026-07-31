@@ -7,10 +7,12 @@ from __future__ import annotations
 import collections
 import glob
 import json
+import logging
 import math
 import os
 import pathlib
 import statistics
+import sys
 import tarfile
 import urllib.request
 from collections.abc import Iterable
@@ -25,6 +27,8 @@ DEEPSWE_CACHE = ROOT / "data" / "deepswe"
 EPISODE_DIR = pathlib.Path(
     os.environ.get("SWEREBENCH_EPISODES", str(ROOT / "results" / "episodes_swerebench"))
 )
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- swe_rebench constants
 HF = "https://huggingface.co/datasets"
@@ -422,28 +426,28 @@ def _pool_report() -> None:
     """
     t = _v2_table()
     text, group, diff, parser = _v2_fields(t)
-    print(f"V2 task pool: {t.num_rows:,} rows, {len(set(group.values())):,} repos, "
-          f"created_at {min(t.column('created_at').to_pylist())} .. "
-          f"{max(t.column('created_at').to_pylist())}")
-    print(f"  language     {collections.Counter(t.column('language').to_pylist()).most_common(6)}")
-    print(f"  log_parser   {collections.Counter(parser.values()).most_common(4)}")
-    print(f"  difficulty   {dict(collections.Counter(diff.values()))}")
+    logger.info(f"V2 task pool: {t.num_rows:,} rows, {len(set(group.values())):,} repos, "
+                f"created_at {min(t.column('created_at').to_pylist())} .. "
+                f"{max(t.column('created_at').to_pylist())}")
+    logger.info(f"  language     {collections.Counter(t.column('language').to_pylist()).most_common(6)}")
+    logger.info(f"  log_parser   {collections.Counter(parser.values()).most_common(4)}")
+    logger.info(f"  difficulty   {dict(collections.Counter(diff.values()))}")
     # Medians, not means: |F2P| runs to 117,906 on one row, so the mean is meaningless.
     f2p = sorted(len(x) for x in t.column("FAIL_TO_PASS").to_pylist())
     p2p = sorted(len(x) for x in t.column("PASS_TO_PASS").to_pylist())
-    print(f"  |F2P| median {statistics.median(f2p)} max {f2p[-1]:,} ==1 for "
-          f"{sum(v == 1 for v in f2p):,}; |P2P| median {statistics.median(p2p)} "
-          f"max {p2p[-1]:,} ==0 for {sum(v == 0 for v in p2p):,} "
-          "(this is the graded-score denominator)")
+    logger.info(f"  |F2P| median {statistics.median(f2p)} max {f2p[-1]:,} ==1 for "
+                f"{sum(v == 1 for v in f2p):,}; |P2P| median {statistics.median(p2p)} "
+                f"max {p2p[-1]:,} ==0 for {sum(v == 0 for v in p2p):,} "
+                "(this is the graded-score denominator)")
     lb, month_of = _leaderboard_table()
-    print(f"leaderboard pool: {lb.num_rows} rows, months {len(set(month_of.values()))}, "
-          f"created_at {min(lb.column('created_at').to_pylist())} .. "
-          f"{max(lb.column('created_at').to_pylist())}")
+    logger.info(f"leaderboard pool: {lb.num_rows} rows, months {len(set(month_of.values()))}, "
+                f"created_at {min(lb.column('created_at').to_pylist())} .. "
+                f"{max(lb.column('created_at').to_pylist())}")
     for pool in ("v2_python", "leaderboard"):
         try:
             load_swe_rebench(pool)
         except RuntimeError as e:
-            print(f"  pool={pool}: NO LABELS -> {e}")
+            logger.info(f"  pool={pool}: NO LABELS -> {e}")
 
 
 def main_swe_rebench() -> None:
@@ -453,25 +457,25 @@ def main_swe_rebench() -> None:
     arms, tasks, score = d["arms"], d["tasks"], d["score"]
     n_cells = len(arms) * len(tasks)
     filled = sum(not math.isnan(v) for row in score for v in row)
-    print(f"\npool=free  n_arms={len(arms)}  n_tasks={len(tasks)}  "
-          f"cells={n_cells:,} filled={filled:,} sparsity={1 - filled / n_cells:.3f}")
+    logger.info(f"\npool=free  n_arms={len(arms)}  n_tasks={len(tasks)}  "
+                f"cells={n_cells:,} filled={filled:,} sparsity={1 - filled / n_cells:.3f}")
     table = []
     for i, a in enumerate(arms):
         vals = [v for v in score[i] if not math.isnan(v)]
         roll = [r for r in d["rollouts"][i] if r]
         table.append((a, len(vals), f"{sum(vals)/len(vals):.4f}",
                       f"{sum(roll)/len(roll):.1f}", d["dropped"][a]["infra"]))
-    print(tabulate(table, headers=["arm", "tasks", "mean score", "rollouts/task", "infra dropped"],
-                   disable_numparse=True))
+    logger.info(tabulate(table, headers=["arm", "tasks", "mean score", "rollouts/task", "infra dropped"],
+                         disable_numparse=True))
     graded = sum(1 for i in range(len(arms)) for j in range(len(tasks))
                  if d["rollouts"][i][j] > 1 and not math.isnan(score[i][j]))
     frac01 = sum(1 for row in score for v in row if not math.isnan(v) and v in (0.0, 1.0))
-    print(f"cells with >1 rollout (i.e. genuinely graded): {graded:,} / {filled:,}; "
-          f"cells still exactly 0.0 or 1.0: {frac01:,}")
-    print(f"difficulty (v1 llm_score.difficulty_score): "
-          f"{dict(collections.Counter(d['difficulty'].values()))}")
-    print(f"groups (repos): {len(set(d['group'].values()))}  cost: {d['cost']}")
-    print(f"notes: {d['notes']}")
+    logger.info(f"cells with >1 rollout (i.e. genuinely graded): {graded:,} / {filled:,}; "
+                f"cells still exactly 0.0 or 1.0: {frac01:,}")
+    logger.info(f"difficulty (v1 llm_score.difficulty_score): "
+                f"{dict(collections.Counter(d['difficulty'].values()))}")
+    logger.info(f"groups (repos): {len(set(d['group'].values()))}  cost: {d['cost']}")
+    logger.info(f"notes: {d['notes']}")
 
 
 # --------------------------------------------------------------------------- deepswe constants
@@ -660,25 +664,25 @@ def main_deepswe() -> None:
     n_a, n_t = len(arms), len(task_ids)
     filled = sum(v is not None for row in score for v in row)
     n_cost = sum(v is not None for row in cost for v in row)
-    print(f"DeepSWE v1.1  n_arms={n_a}  n_tasks={n_t}  metric=f2p (graded)")
-    print(f"score cells {filled}/{n_a * n_t} filled ({100 * filled / (n_a * n_t):.2f}%), "
-          f"{n_a * n_t - filled} None (provider_timeout = missing label, not model failure)")
-    print(f"cost cells {n_cost}/{n_a * n_t} filled ({100 * n_cost / (n_a * n_t):.2f}%)")
-    print(f"crosscheck: {_crosscheck(arms)}")
-    print(f"text: instruction.md chars min={min(len(v) for v in d['text'].values())} "
-          f"median={statistics.median(len(v) for v in d['text'].values()):.0f} "
-          f"max={max(len(v) for v in d['text'].values())}")
-    print(f"groups: {len(set(d['group'].values()))} repos over {n_t} tasks; "
-          f"difficulty (DERIVED mean pass rate) min={min(d['difficulty'].values()):.3f} "
-          f"median={statistics.median(d['difficulty'].values()):.3f} "
-          f"max={max(d['difficulty'].values()):.3f}")
+    logger.info(f"DeepSWE v1.1  n_arms={n_a}  n_tasks={n_t}  metric=f2p (graded)")
+    logger.info(f"score cells {filled}/{n_a * n_t} filled ({100 * filled / (n_a * n_t):.2f}%), "
+                f"{n_a * n_t - filled} None (provider_timeout = missing label, not model failure)")
+    logger.info(f"cost cells {n_cost}/{n_a * n_t} filled ({100 * n_cost / (n_a * n_t):.2f}%)")
+    logger.info(f"crosscheck: {_crosscheck(arms)}")
+    logger.info(f"text: instruction.md chars min={min(len(v) for v in d['text'].values())} "
+                f"median={statistics.median(len(v) for v in d['text'].values()):.0f} "
+                f"max={max(len(v) for v in d['text'].values())}")
+    logger.info(f"groups: {len(set(d['group'].values()))} repos over {n_t} tasks; "
+                f"difficulty (DERIVED mean pass rate) min={min(d['difficulty'].values()):.3f} "
+                f"median={statistics.median(d['difficulty'].values()):.3f} "
+                f"max={max(d['difficulty'].values()):.3f}")
 
     binary = load_deepswe("passed")["score"]
     table = [(arms[i], f"{_mean(score[i]):.3f}", f"{_mean(binary[i]):.3f}",
               f"{_mean(cost[i]):.2f}", sum(v is not None for v in score[i]))
              for i in sorted(range(n_a), key=lambda i: -_mean(score[i]))]
-    print()
-    print(tabulate(table, headers=["arm", "f2p", "pass@1", "$/task", "n"], disable_numparse=True))
+    logger.info("")
+    logger.info(tabulate(table, headers=["arm", "f2p", "pass@1", "$/task", "n"], disable_numparse=True))
 
     # Routing headroom, computed binary so it is comparable to a published pass@1. "solves" means
     # the arm's majority of trials passed; unpriced cells are excluded from the cost sums rather
@@ -689,16 +693,17 @@ def main_deepswe() -> None:
     cheapest = [min((cost[i][j] for i in s if cost[i][j] is not None), default=None)
                 for j, s in enumerate(solved)]
     cheap = sum(c for c in cheapest if c is not None)
-    print(f"\nbest single arm {arms[best]} pass@1={_mean(binary[best]):.3f}, "
-          f"${always:.0f} to run all {n_t} tasks")
-    print(f"oracle any-arm-solves={statistics.fmean(float(bool(s)) for s in solved):.3f}; "
-          f"cheapest-arm-that-solves ${cheap:.0f} over "
-          f"{sum(c is not None for c in cheapest)} priced tasks ({always / cheap:.1f}x cheaper)")
-    print(f"tasks solved by ALL arms: {sum(len(s) == n_a for s in solved)}; "
-          f"by NO arm: {sum(not s for s in solved)}")
+    logger.info(f"\nbest single arm {arms[best]} pass@1={_mean(binary[best]):.3f}, "
+                f"${always:.0f} to run all {n_t} tasks")
+    logger.info(f"oracle any-arm-solves={statistics.fmean(float(bool(s)) for s in solved):.3f}; "
+                f"cheapest-arm-that-solves ${cheap:.0f} over "
+                f"{sum(c is not None for c in cheapest)} priced tasks ({always / cheap:.1f}x cheaper)")
+    logger.info(f"tasks solved by ALL arms: {sum(len(s) == n_a for s in solved)}; "
+                f"by NO arm: {sum(not s for s in solved)}")
 
 
 if __name__ == "__main__":
     import fire
 
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
     fire.Fire({"swe-rebench": main_swe_rebench, "deepswe": main_deepswe})
