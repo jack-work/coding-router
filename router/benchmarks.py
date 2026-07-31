@@ -505,10 +505,101 @@ def cmd_smoke_agent(args: argparse.Namespace) -> None:
             shutil.rmtree(work, ignore_errors=True)
 
 
+# ============================================================ export-texts / fetch-embeddings
+"""Embedding-model comparison support: one text pool, one cache file per embedding model.
+
+`export-texts` writes results/router_texts.jsonl with every task text the LR-baseline
+experiment routes over, ids namespaced by dataset ("lcb:", "dswe:", "srb:"). That file is
+what gets shipped to a GPU box to extract open-weight embeddings (Qwen3-Embedding-*), so
+the exact text (incl. the 8000-char truncation) is identical across API and local models.
+
+`fetch-embeddings` fills results/emb/<model>.json for the OpenAI API models, seeding
+text-embedding-3-large from the two existing per-dataset caches rather than re-buying them.
+"""
+
+TEXTS_JSONL = ROOT / "results" / "router_texts.jsonl"
+EMB_DIR = ROOT / "results" / "emb"
+TEXT_CLIP = 8000  # chars; matches every embedding call in this repo
+OPENAI_EMB = {"te3-large": "text-embedding-3-large", "te3-small": "text-embedding-3-small"}
+SEED_CACHES = {  # existing per-dataset text-embedding-3-large caches -> namespace prefix
+    "lcb": ROOT / "results" / "lcb_embeddings.json",
+    "dswe": ROOT / "results" / "deepswe_embeddings.json",
+}
+
+
+def routed_texts() -> dict[str, str]:
+    """All task texts the lr-baseline experiment can route, keyed by namespaced id."""
+    from router import datasets  # local import: pyarrow only needed here
+
+    out: dict[str, str] = {}
+    lcb = route.load_matrix()
+    probs = {p.qid: p for p in sandbox.load()}
+    for q in lcb.qids:
+        out[f"lcb:{q}"] = probs[q].statement[:TEXT_CLIP]
+    dswe = datasets.load_deepswe()
+    for t, txt in dswe["text"].items():
+        out[f"dswe:{t}"] = txt[:TEXT_CLIP]
+    srb = datasets.load_swe_rebench("free")
+    for t, txt in srb["text"].items():
+        out[f"srb:{t}"] = (txt or t)[:TEXT_CLIP]
+    return out
+
+
+def cmd_export_texts(args: argparse.Namespace) -> None:
+    texts = routed_texts()
+    with TEXTS_JSONL.open("w") as fh:
+        for k, v in sorted(texts.items()):
+            fh.write(json.dumps({"id": k, "text": v}) + "\n")
+    by_ds = {}
+    for k in texts:
+        by_ds[k.split(":")[0]] = by_ds.get(k.split(":")[0], 0) + 1
+    print(f"{len(texts)} texts -> {TEXTS_JSONL}  {by_ds}")
+
+
+def cmd_fetch_embeddings(args: argparse.Namespace) -> None:
+    load_env()
+    import openai
+
+    texts = routed_texts()
+    EMB_DIR.mkdir(parents=True, exist_ok=True)
+    for name in args.models:
+        dest = EMB_DIR / f"{name}.json"
+        cache: dict[str, list[float]] = json.loads(dest.read_text()) if dest.exists() else {}
+        if name == "te3-large":  # seed from the per-dataset caches already on disk
+            for ns, p in SEED_CACHES.items():
+                if p.exists():
+                    for q, v in json.loads(p.read_text()).items():
+                        cache.setdefault(f"{ns}:{q}", v)
+        todo = sorted(k for k in texts if k not in cache)
+        print(f"{name}: {len(cache)} cached, {len(todo)} to fetch")
+        if todo:
+            cl = openai.OpenAI()
+            batches = [todo[i:i + 64] for i in range(0, len(todo), 64)]
+
+            def fetch(chunk: list[str], model_id: str = OPENAI_EMB[name]) -> list:
+                return cl.embeddings.create(model=model_id,
+                                            input=[texts[k] for k in chunk]).data
+
+            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+                for i, (chunk, data) in enumerate(zip(batches, ex.map(fetch, batches))):
+                    for k, e in zip(chunk, data):
+                        cache[k] = e.embedding
+                    if i % 5 == 4:
+                        print(f"  {name}: {sum(len(b) for b in batches[:i+1])}/{len(todo)}")
+            dest.write_text(json.dumps(cache))
+        print(f"  -> {dest} ({len(cache)} vectors)")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     subparsers = ap.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("export-texts").set_defaults(func=cmd_export_texts)
+    sp = subparsers.add_parser("fetch-embeddings")
+    sp.add_argument("--models", nargs="+", default=list(OPENAI_EMB),
+                    choices=list(OPENAI_EMB))
+    sp.set_defaults(func=cmd_fetch_embeddings)
 
     subparsers.add_parser("fetch-swebench-matrix").set_defaults(func=cmd_fetch_swebench_matrix)
     subparsers.add_parser("transfer-swebench").set_defaults(func=cmd_transfer_swebench)

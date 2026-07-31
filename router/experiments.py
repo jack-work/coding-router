@@ -483,6 +483,375 @@ def cmd_race_router(args: argparse.Namespace) -> None:
         print("  -> Per the stated decision rule, the cascade is what ships.")
 
 
+# ============================================================ lr-baseline
+"""LR-baseline: logistic regression router vs the kNN incumbent, across embedding models.
+
+Three experiments, all evaluated on DeepSWE 80/20 repo-split holdouts (6 seeds), pooled:
+  dswe80    -- per-arm LR on task embeddings, trained on the 80% repos.  The core question:
+               does a fitted linear head beat the kNN lookup at matched graded score?
+  lcb2dswe  -- transfer FROM LiveCodeBench: the two arm pools share ~1 arm, so what
+               transfers is the embedding->difficulty DIRECTION (one LR fit on LCB's
+               per-task mean graded score).  Its score z(x) feeds DeepSWE-side per-arm
+               heads: mode `srcdiff` fits heads on [z] alone, `emb+srcdiff` on [emb, z].
+  srb2dswe  -- same, FROM the SWE-rebench free pool (nebius; 4 arms x 1424 tasks, graded
+               pass rates, no cost -- cost never leaves DeepSWE).
+
+Per-arm P(solve|x) is fitted with SOFT labels (sample-weight trick: each task enters as a
+positive with weight graded and a negative with weight 1-graded) -- graded targets carry
+~4-6x more signal than binary on this data, and Hybrid-LLM (arXiv:2404.14618) measured
+soft labels beating hard ones for exactly this predictor.  Decision rule and tuning mirror
+holdout-deepswe exactly: cheapest arm with p >= tau else train-best arm, (C, tau) chosen on
+an inner 75/25 repo split of the train side only, feasibility = graded >= inner-best - 0.02.
+
+Execution: every (experiment x embedding x seed) tuple is one job; jobs are featurized
+locally (numpy arrays only, no secrets) and executed in E2B sandboxes concurrently
+(--local runs in-process for smoke tests).  Aggregation pools the per-seed holdout
+decisions and prints, per experiment, a traffic table in the standard format:
+arm | % traffic | $/task | $ total | % spend | graded, plus an always-best baseline line.
+"""
+
+LRB_EMB_DIR = ROOT / "results" / "emb"
+LRB_OUT = ROOT / "results" / "lr_baseline.json"
+LRB_SEEDS = tuple(range(6))
+LRB_MODES = {"dswe80": ("emb",), "lcb2dswe": ("srcdiff", "emb+srcdiff"),
+             "srb2dswe": ("srcdiff", "emb+srcdiff")}
+
+# Self-contained sandbox payload: tune (C, tau) / (k, tau) on an inner repo split of the
+# train indices, then route the held-out tasks once.  Reads job.json + data.npz, writes
+# result.json.  Deliberately numpy-only: the repo carries no sklearn, and a sandbox that
+# needs one pip package boots faster than one that needs a compiled stack.
+LRB_RUNNER = '''
+import json
+import numpy as np
+
+job = json.load(open("job.json"))
+d = np.load("data.npz")
+X, graded, cost, groups = d["X"], d["graded"], d["cost"], d["groups"]
+tr, te = d["tr"], d["te"]
+# Finer tau grid than holdout-deepswe used: LR probabilities hug each arm's base rate,
+# so thresholds between base rates need resolution the 0.2-spaced grid did not have.
+# Both LR and kNN get the SAME grids and the same tuning rule.
+C_GRID = (0.02, 0.1, 0.5, 2.0)
+TAU_GRID = (0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95)
+K_GRID = (6, 12, 20)
+
+##LRFIT##
+
+
+def sigmoid(z):
+    return 0.5 * (1.0 + np.tanh(0.5 * z))
+
+
+def fit_probs(Xtr, gtr, Xq, C):
+    """Per-arm graded-target LR -> (n_arms, n_query) predicted P(solve)."""
+    return np.stack([sigmoid(_lrb_fit_lr(Xtr, gtr[a], Xq, C)) for a in range(gtr.shape[0])])
+
+
+def knn_probs(Etr, gtr, Eq, k):
+    out = np.zeros((gtr.shape[0], len(Eq)))
+    for j in range(len(Eq)):
+        sims = Etr @ Eq[j]
+        nn = np.argsort(-sims)[: min(k, len(sims))]
+        w = np.clip(sims[nn], 0, None) + 1e-6
+        out[:, j] = (gtr[:, nn] >= 1.0) @ w / w.sum()
+    return out
+
+
+def route_all(p, med, tau, fallback):
+    order = np.argsort(med)
+    picks = []
+    for j in range(p.shape[1]):
+        pick = next((int(i) for i in order if p[i, j] >= tau), fallback)
+        picks.append(pick)
+    return picks
+
+
+def inner_pick(kind):
+    """Choose hyperparameters on a 75/25 repo split of tr, never touching te."""
+    rng = np.random.default_rng(100 + job["seed"])
+    repos = sorted(set(groups[tr].tolist()))
+    rng.shuffle(repos)
+    a_r = set(repos[: int(round(len(repos) * 0.75))])
+    A = np.array([j for j in tr if groups[j] in a_r])
+    V = np.array([j for j in tr if groups[j] not in a_r])
+    med = np.median(cost[:, A], axis=1)
+    fb = int(np.argmax(graded[:, A].mean(axis=1)))
+    vb_g, vb_c = graded[fb, V].mean(), cost[fb, V].sum()
+    cand = []
+    if kind == "lr":
+        grid = [(C, t) for C in C_GRID for t in TAU_GRID]
+        probs = {C: fit_probs(X[A], graded[:, A], X[V], C) for C in C_GRID}
+    else:
+        grid = [(k, t) for k in K_GRID for t in TAU_GRID]
+        probs = {k: knn_probs(X[A], graded[:, A], X[V], k) for k in K_GRID}
+    for h, t in grid:
+        picks = route_all(probs[h], med, t, fb)
+        g = np.mean([graded[i, j] for i, j in zip(picks, V)])
+        c = sum(cost[i, j] for i, j in zip(picks, V))
+        if c > 0 and g >= vb_g - 0.02:
+            cand.append((vb_c / c, h, t))
+    return max(cand)[1:] if cand else ((0.1, 0.5) if kind == "lr" else (12, 0.5))
+
+
+def evaluate(kind, h, t):
+    med = np.median(cost[:, tr], axis=1)
+    fb = int(np.argmax(graded[:, tr].mean(axis=1)))
+    p = (fit_probs(X[tr], graded[:, tr], X[te], h) if kind == "lr"
+         else knn_probs(X[tr], graded[:, tr], X[te], h))
+    picks = route_all(p, med, t, fb)
+    return {"picks": [int(i) for i in picks], "h": h, "tau": t, "fallback": fb}
+
+res = {"lr": evaluate("lr", *inner_pick("lr"))}
+if job["with_knn"]:
+    res["knn"] = evaluate("knn", *inner_pick("knn"))
+res["always_best"] = {"picks": [int(np.argmax(graded[:, tr].mean(axis=1)))] * len(te)}
+res["always_cheapest"] = {"picks": [int(np.argmin(np.median(cost[:, tr], axis=1)))] * len(te)}
+json.dump(res, open("result.json", "w"))
+print("OK")
+'''
+
+
+def _lrb_load_emb(model: str) -> dict[str, np.ndarray]:
+    cache = json.loads((LRB_EMB_DIR / f"{model}.json").read_text())
+    out = {}
+    for k, v in cache.items():
+        e = np.asarray(v, dtype=np.float32)
+        out[k] = e / (np.linalg.norm(e) or 1.0)
+    return out
+
+
+def _lrb_deepswe41() -> route.Matrix:
+    """The 41-arm frontier pool, same filter as holdout-deepswe."""
+    full = build()
+    keep = [i for i, a in enumerate(full.arms)
+            if any(t in a for t in ("gpt_5", "claude_", "codex"))]
+    return route.Matrix(arms=[full.arms[i] for i in keep], qids=full.qids,
+                        resolved=full.resolved[keep], graded=full.graded[keep],
+                        cost=full.cost[keep], difficulty=full.difficulty, group=full.group)
+
+
+def _lrb_fit_lr(Xtr: np.ndarray, t: np.ndarray, Xq: np.ndarray, C: float) -> np.ndarray:
+    """Same numpy dual-IRLS logistic regression as LRB_RUNNER; returns logits for Xq."""
+    t = np.clip(np.asarray(t, dtype=np.float64), 1e-4, 1.0 - 1e-4)
+    b0 = np.log(t.mean() / (1.0 - t.mean()))
+    Xtr64 = Xtr.astype(np.float64)
+    K = Xtr64 @ Xtr64.T + 1.0
+    a = np.zeros(len(t))
+
+    def loss(v: np.ndarray) -> float:
+        z = b0 + K @ v
+        return float((np.logaddexp(0.0, z) - t * z).sum() + v @ K @ v / (2.0 * C))
+
+    cur = loss(a)
+    for _ in range(50):
+        p = 0.5 * (1.0 + np.tanh(0.5 * (b0 + K @ a)))
+        g = (p - t) + a / C
+        if np.abs(g).max() < 1e-9:
+            break
+        step = np.linalg.solve((p * (1.0 - p))[:, None] * K + np.eye(len(t)) / C, g)
+        nxt = loss(a - step)
+        for _ in range(12):
+            if nxt <= cur:
+                break
+            step *= 0.5
+            nxt = loss(a - step)
+        a, cur = a - step, nxt
+    return (b0 + (Xq.astype(np.float64) @ Xtr64.T + 1.0) @ a).astype(np.float32)
+
+
+def _lrb_src_score(exp: str, emb: dict[str, np.ndarray], m: route.Matrix) -> np.ndarray:
+    """Fit embedding->difficulty on the source pool; return z for every DeepSWE task."""
+    if exp == "lcb2dswe":
+        src = route.load_matrix()
+        ids = [f"lcb:{q}" for q in src.qids]
+        target = src.graded.mean(axis=0)
+    else:
+        d = datasets.load_swe_rebench("free")
+        score = np.array(d["score"], dtype=float)
+        keep = [j for j in range(score.shape[1]) if np.isfinite(score[:, j]).sum() >= 2]
+        ids = [f"srb:{d['tasks'][j]}" for j in keep]
+        target = np.array([np.nanmean(score[:, j]) for j in keep])
+    Xs = np.stack([emb[i] for i in ids])
+    Xq = np.stack([emb[f"dswe:{q}"] for q in m.qids])
+    return _lrb_fit_lr(Xs, target, Xq, C=0.1)
+
+
+def _lrb_payload(m: route.Matrix, X: np.ndarray, seed: int) -> bytes:
+    import io
+
+    tr, te = split_by_repo_holdout(m, 0.8, seed)
+    codes = {g: i for i, g in enumerate(sorted(set(m.group)))}
+    buf = io.BytesIO()
+    np.savez_compressed(
+        buf, X=X.astype(np.float32), graded=m.graded.astype(np.float32),
+        cost=m.cost.astype(np.float32),
+        groups=np.array([codes[g] for g in m.group]), tr=tr, te=te)
+    return buf.getvalue()
+
+
+def _lrb_runner_src() -> str:
+    """LRB_RUNNER with the SAME dual-IRLS fit the local side uses, injected by source."""
+    import inspect
+
+    return LRB_RUNNER.replace("##LRFIT##", inspect.getsource(_lrb_fit_lr))
+
+
+def _lrb_run_sandbox(job: dict, payload: bytes) -> dict:
+    tag = {"lane": "coding-router-lr", "job": f"{job['exp']}:{job['emb']}:{job['seed']}"}
+    with sandbox.SandboxSession(tag) as s:
+        s.write("runner.py", _lrb_runner_src())
+        s.write("job.json", json.dumps(job))
+        s.sb.files.write("data.npz", payload)
+        rc, out, err = s.run("python3 -c 'import numpy' 2>/dev/null "
+                             "|| pip install -q numpy; python3 runner.py", timeout=420.0)
+        if rc != 0 or "OK" not in out:
+            raise RuntimeError(f"job {tag['job']} failed rc={rc}: {out[-400:]} {err[-400:]}")
+        return json.loads(s.read("result.json"))
+
+
+def _lrb_run_local(job: dict, payload: bytes) -> dict:
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="lrb-") as td:
+        p = pathlib.Path(td)
+        (p / "runner.py").write_text(_lrb_runner_src())
+        (p / "job.json").write_text(json.dumps(job))
+        (p / "data.npz").write_bytes(payload)
+        r = subprocess.run([sys.executable, "runner.py"], cwd=td, capture_output=True,
+                           text=True, timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError(f"local job failed: {r.stderr[-600:]}")
+        return json.loads((p / "result.json").read_text())
+
+
+def _lrb_table(m: route.Matrix, cells: list[tuple[int, int]], base: list[tuple[int, int]],
+               title: str) -> dict:
+    """The standard traffic table over pooled (arm, task) decisions."""
+    n = len(cells)
+    by_arm: dict[int, list[int]] = {}
+    for a, j in cells:
+        by_arm.setdefault(a, []).append(j)
+    total = sum(m.cost[a, j] for a, j in cells)
+    rows: list[dict] = []
+    for a, js in sorted(by_arm.items(), key=lambda kv: -len(kv[1])):
+        c = sum(m.cost[a, j] for j in js)
+        rows.append({"arm": m.arms[a], "traffic": len(js) / n, "per_task": c / len(js),
+                     "total": c, "spend": c / total if total else 0.0,
+                     "graded": float(np.mean([m.graded[a, j] for j in js]))})
+    g_all = float(np.mean([m.graded[a, j] for a, j in cells]))
+    b_arm = m.arms[base[0][0]] if len({a for a, _ in base}) == 1 else "always-best (per-seed)"
+    b_tot = sum(m.cost[a, j] for a, j in base)
+    b_g = float(np.mean([m.graded[a, j] for a, j in base]))
+    w = max(len(r["arm"]) for r in rows)
+    print(f"\n=== {title} ===")
+    print(f"  {'arm':{w}s} {'% traffic':>10s} {'$/task':>8s} {'$ total':>8s} "
+          f"{'% spend':>8s} {'graded':>7s}")
+    for r in rows:
+        print(f"  {r['arm']:{w}s} {r['traffic']*100:9.1f}% {r['per_task']:8.2f} "
+              f"{r['total']:8.1f} {r['spend']*100:7.1f}% {r['graded']:7.3f}")
+    print(f"  {'total':{w}s} {'100%':>10s} {total/n:8.2f} {total:8.1f} {'100%':>8s} {g_all:7.3f}")
+    print(f"  Baseline is 100% to {b_arm} at ${b_tot/len(base):.2f}/task, ${b_tot:.1f} total, "
+          f"graded {b_g:.3f}. Saving is blended ${total/n:.2f} vs ${b_tot/len(base):.2f} "
+          f"({b_tot/total if total else float('inf'):.2f}x).")
+    return {"rows": rows, "total": total, "per_task": total / n, "graded": g_all,
+            "baseline": {"arm": b_arm, "total": b_tot, "per_task": b_tot / len(base),
+                         "graded": b_g},
+            "ratio": b_tot / total if total else None}
+
+
+def cmd_lr_baseline(args: argparse.Namespace) -> None:
+    load_env()
+    m = _lrb_deepswe41()
+    print(f"DeepSWE pool: {len(m.arms)} arms x {m.n} tasks x {len(set(m.group))} repos")
+    emb_models = args.emb or sorted(p.stem for p in LRB_EMB_DIR.glob("*.json"))
+    print(f"embedding models: {emb_models}; experiments: {args.exps}; seeds: {list(LRB_SEEDS)}")
+
+    jobs: list[tuple[dict, bytes]] = []
+    for name in emb_models:
+        emb = _lrb_load_emb(name)
+        missing = [q for q in m.qids if f"dswe:{q}" not in emb]
+        assert not missing, f"{name}: {len(missing)} DeepSWE tasks lack embeddings"
+        E = np.stack([emb[f"dswe:{q}"] for q in m.qids])
+        for exp in args.exps:
+            feats: dict[str, np.ndarray] = {}
+            if exp == "dswe80":
+                feats["emb"] = E
+            else:
+                z = _lrb_src_score(exp, emb, m)[:, None]
+                feats["srcdiff"] = z
+                feats["emb+srcdiff"] = np.hstack([E, z])
+            for mode, X in feats.items():
+                for seed in LRB_SEEDS:
+                    job = {"exp": exp, "emb": name, "mode": mode, "seed": seed,
+                           "with_knn": exp == "dswe80" and mode == "emb"}
+                    jobs.append((job, _lrb_payload(m, X, seed)))
+    print(f"{len(jobs)} jobs -> {'local' if args.local else 'E2B'} (workers={args.workers})")
+
+    sandbox.semaphore(args.workers)
+    run = _lrb_run_local if args.local else _lrb_run_sandbox
+    results: dict[tuple, dict] = {}
+    t0 = time.time()
+    with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(run, job, pay): job for job, pay in jobs}
+        for i, f in enumerate(cf.as_completed(futs), 1):
+            job = futs[f]
+            results[(job["exp"], job["emb"], job["mode"], job["seed"])] = f.result()
+            print(f"  [{i:3d}/{len(jobs)}] {job['exp']}:{job['emb']}:{job['mode']}"
+                  f":s{job['seed']} done", flush=True)
+    print(f"all jobs in {time.time()-t0:.0f}s")
+
+    # ---- aggregate: pool per-seed holdout decisions, one table per (exp, emb, mode) ----
+    splits = {seed: split_by_repo_holdout(m, 0.8, seed) for seed in LRB_SEEDS}
+    out: dict[str, dict] = {"pool": {"arms": m.arms, "n_tasks": m.n}, "tables": {}}
+    summary = []
+    for exp, name, mode in sorted({k[:3] for k in results}):
+        cells, base, ratios = [], [], []
+        for seed in LRB_SEEDS:
+            r = results[(exp, name, mode, seed)]
+            te = splits[seed][1]
+            cells += [(a, int(j)) for a, j in zip(r["lr"]["picks"], te)]
+            ba = r["always_best"]["picks"][0]
+            base += [(ba, int(j)) for j in te]
+            pc = sum(m.cost[a, int(j)] for a, j in zip(r["lr"]["picks"], te))
+            bc = sum(m.cost[ba, int(j)] for j in te)
+            ratios.append(bc / pc if pc else float("inf"))
+        t = _lrb_table(m, cells, base,
+                       f"{exp} | {name} | {mode} | LR pooled over {len(LRB_SEEDS)} seeds")
+        t["per_seed_ratio"] = ratios
+        gd = t["graded"] - t["baseline"]["graded"]
+        print(f"  per-seed ratio median {np.median(ratios):.2f} "
+              f"(min {min(ratios):.2f}, max {max(ratios):.2f}); graded delta {gd:+.3f}")
+        out["tables"][f"{exp}|{name}|{mode}"] = t
+        summary.append((exp, name, mode, "lr", t["ratio"], gd))
+        if exp == "dswe80" and mode == "emb":  # kNN incumbent on identical splits
+            kcells = []
+            for seed in LRB_SEEDS:
+                r = results[(exp, name, mode, seed)]
+                te = splits[seed][1]
+                kcells += [(a, int(j)) for a, j in zip(r["knn"]["picks"], te)]
+            kt = _lrb_table(m, kcells, base, f"{exp} | {name} | kNN incumbent (same splits)")
+            out["tables"][f"{exp}|{name}|knn"] = kt
+            summary.append((exp, name, "emb", "knn", kt["ratio"],
+                            kt["graded"] - kt["baseline"]["graded"]))
+
+    print("\n=== summary: cost ratio vs always-best (graded delta) ===")
+    print(f"  {'experiment':10s} {'mode':12s} {'policy':6s} "
+          + " ".join(f"{n:>18s}" for n in emb_models))
+    for exp in args.exps:
+        for mode in LRB_MODES[exp]:
+            for pol in (("lr", "knn") if exp == "dswe80" else ("lr",)):
+                vals = []
+                for name in emb_models:
+                    hit = [s for s in summary
+                           if s[:4] == (exp, name, mode if pol == "lr" else "emb", pol)]
+                    vals.append(f"{hit[0][4]:5.2f}x ({hit[0][5]:+.3f})" if hit else "--")
+                print(f"  {exp:10s} {mode:12s} {pol:6s} "
+                      + " ".join(f"{v:>18s}" for v in vals))
+    LRB_OUT.write_text(json.dumps(out, indent=1))
+    print(f"-> {LRB_OUT}")
+
+
 # ============================================================ probe-arms
 """Probe every candidate routing arm with a real tool-calling request.
 
@@ -611,6 +980,13 @@ if __name__ == "__main__":
     subparsers = ap.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("holdout-deepswe").set_defaults(func=cmd_holdout_deepswe)
+    sp = subparsers.add_parser("lr-baseline")
+    sp.add_argument("--emb", nargs="*", default=None,
+                    help="embedding model cache names under results/emb/ (default: all)")
+    sp.add_argument("--exps", nargs="+", default=list(LRB_MODES), choices=list(LRB_MODES))
+    sp.add_argument("--local", action="store_true", help="run jobs in-process (smoke test)")
+    sp.add_argument("--workers", type=int, default=40)
+    sp.set_defaults(func=cmd_lr_baseline)
     subparsers.add_parser("exp1-holdout9").set_defaults(func=cmd_exp1_holdout9)
     subparsers.add_parser("race-router").set_defaults(func=cmd_race_router)
     subparsers.add_parser("race-deepswe").set_defaults(func=cmd_race_deepswe)

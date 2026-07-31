@@ -11,3 +11,5 @@ __pycache__/
 .DS_Store
 .ruff_cache/
 .ty_cache/
+results/emb/
+results/router_texts.jsonl

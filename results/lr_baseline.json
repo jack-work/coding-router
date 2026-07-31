@@ -1,0 +1,246 @@
+{
+ "pool": {
+  "arms": [
+   "mini_swe_agent_claude_fable_5_high",
+   "mini_swe_agent_claude_fable_5_low",
+   "mini_swe_agent_claude_fable_5_max",
+   "mini_swe_agent_claude_fable_5_medium",
+   "mini_swe_agent_claude_fable_5_xhigh",
+   "mini_swe_agent_claude_opus_4_8_high",
+   "mini_swe_agent_claude_opus_4_8_low",
+   "mini_swe_agent_claude_opus_4_8_max",
+   "mini_swe_agent_claude_opus_4_8_medium",
+   "mini_swe_agent_claude_opus_4_8_xhigh",
+   "mini_swe_agent_claude_opus_5_high",
+   "mini_swe_agent_claude_opus_5_low",
+   "mini_swe_agent_claude_opus_5_max",
+   "mini_swe_agent_claude_opus_5_medium",
+   "mini_swe_agent_claude_opus_5_xhigh",
+   "mini_swe_agent_claude_sonnet_4_6_high",
+   "mini_swe_agent_claude_sonnet_5_high",
+   "mini_swe_agent_claude_sonnet_5_low",
+   "mini_swe_agent_claude_sonnet_5_max",
+   "mini_swe_agent_claude_sonnet_5_medium",
+   "mini_swe_agent_claude_sonnet_5_xhigh",
+   "mini_swe_agent_gpt_5_4_xhigh",
+   "mini_swe_agent_gpt_5_5_high",
+   "mini_swe_agent_gpt_5_5_low",
+   "mini_swe_agent_gpt_5_5_medium",
+   "mini_swe_agent_gpt_5_5_xhigh",
+   "mini_swe_agent_gpt_5_6_luna_high",
+   "mini_swe_agent_gpt_5_6_luna_low",
+   "mini_swe_agent_gpt_5_6_luna_max",
+   "mini_swe_agent_gpt_5_6_luna_medium",
+   "mini_swe_agent_gpt_5_6_luna_xhigh",
+   "mini_swe_agent_gpt_5_6_sol_high",
+   "mini_swe_agent_gpt_5_6_sol_low",
+   "mini_swe_agent_gpt_5_6_sol_max",
+   "mini_swe_agent_gpt_5_6_sol_medium",
+   "mini_swe_agent_gpt_5_6_sol_xhigh",
+   "mini_swe_agent_gpt_5_6_terra_high",
+   "mini_swe_agent_gpt_5_6_terra_low",
+   "mini_swe_agent_gpt_5_6_terra_max",
+   "mini_swe_agent_gpt_5_6_terra_medium",
+   "mini_swe_agent_gpt_5_6_terra_xhigh"
+  ],
+  "n_tasks": 110
+ },
+ "tables": {
+  "dswe80|te3-small|emb": {
+   "rows": [
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_high",
+     "traffic": 0.25547445255474455,
+     "per_task": 0.681231377142857,
+     "total": 23.843098199999993,
+     "spend": 0.09597134841472517,
+     "graded": 0.9162917369057508
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_terra_high",
+     "traffic": 0.1678832116788321,
+     "per_task": 1.1831104782608697,
+     "total": 27.211541,
+     "spend": 0.10952973729783907,
+     "graded": 0.8983534496387005
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_medium",
+     "traffic": 0.15328467153284672,
+     "per_task": 0.23750522857142856,
+     "total": 4.9876097999999995,
+     "spend": 0.02007573151179228,
+     "graded": 0.6942382073722324
+    },
+    {
+     "arm": "mini_swe_agent_claude_opus_5_high",
+     "traffic": 0.15328467153284672,
+     "per_task": 5.640077260912699,
+     "total": 118.44162247916668,
+     "spend": 0.47674182786167674,
+     "graded": 0.9686726220126205
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_max",
+     "traffic": 0.145985401459854,
+     "per_task": 2.4404827925,
+     "total": 48.809655850000006,
+     "spend": 0.19646475673128674,
+     "graded": 0.8777451335138491
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_sol_low",
+     "traffic": 0.072992700729927,
+     "per_task": 1.1463410499999998,
+     "total": 11.463410499999998,
+     "spend": 0.046141611039311956,
+     "graded": 0.8585994090430621
+    },
+    {
+     "arm": "mini_swe_agent_claude_opus_5_low",
+     "traffic": 0.0364963503649635,
+     "per_task": 2.2772804625,
+     "total": 11.3864023125,
+     "spend": 0.04583164378877449,
+     "graded": 0.9799552071668532
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_xhigh",
+     "traffic": 0.014598540145985401,
+     "per_task": 1.148206975,
+     "total": 2.29641395,
+     "spend": 0.009243343354593293,
+     "graded": 0.9926470588235294
+    }
+   ],
+   "total": 248.43975409166674,
+   "per_task": 1.8134288619829688,
+   "graded": 0.8808717844135928,
+   "baseline": {
+    "arm": "always-best (per-seed)",
+    "total": 757.6529180208331,
+    "per_task": 5.530313270225059,
+    "graded": 0.9338904177981193
+   },
+   "ratio": 3.0496444532032587,
+   "per_seed_ratio": [
+    2.107911994046546,
+    22.750481402935723,
+    6.316759351767026,
+    1.0,
+    5.172973047811987,
+    5.887830938616363
+   ]
+  },
+  "dswe80|te3-small|knn": {
+   "rows": [
+    {
+     "arm": "mini_swe_agent_gpt_5_6_terra_high",
+     "traffic": 0.22627737226277372,
+     "per_task": 1.168768185483871,
+     "total": 36.23181375,
+     "spend": 0.17892041070417086,
+     "graded": 0.8646816598560035
+    },
+    {
+     "arm": "mini_swe_agent_claude_opus_5_low",
+     "traffic": 0.18248175182481752,
+     "per_task": 1.6713012025000002,
+     "total": 41.78253006250001,
+     "spend": 0.20633102970291867,
+     "graded": 0.9236898762318743
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_sol_medium",
+     "traffic": 0.13138686131386862,
+     "per_task": 1.643176763888889,
+     "total": 29.57718175,
+     "spend": 0.14605842099698657,
+     "graded": 0.9892342121346187
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_xhigh",
+     "traffic": 0.10948905109489052,
+     "per_task": 1.1256683433333334,
+     "total": 16.88502515,
+     "spend": 0.08338184931711441,
+     "graded": 0.9166952939202219
+    },
+    {
+     "arm": "mini_swe_agent_claude_opus_5_medium",
+     "traffic": 0.08759124087591241,
+     "per_task": 2.8350563559027777,
+     "total": 34.020676270833334,
+     "spend": 0.16800134304099362,
+     "graded": 0.9252625036079779
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_high",
+     "traffic": 0.08759124087591241,
+     "per_task": 0.6918041583333333,
+     "total": 8.3016499,
+     "spend": 0.04099531477720292,
+     "graded": 0.9176849846007454
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_terra_medium",
+     "traffic": 0.072992700729927,
+     "per_task": 0.5991430624999999,
+     "total": 5.991430625,
+     "spend": 0.02958696010989919,
+     "graded": 0.7523258762776
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_sol_low",
+     "traffic": 0.051094890510948905,
+     "per_task": 1.0157319642857143,
+     "total": 7.11012375,
+     "spend": 0.035111304951093686,
+     "graded": 0.8608635482383871
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_luna_max",
+     "traffic": 0.021897810218978103,
+     "per_task": 3.4358081000000005,
+     "total": 10.307424300000001,
+     "spend": 0.050900255829951405,
+     "graded": 0.9016203703703703
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_terra_xhigh",
+     "traffic": 0.014598540145985401,
+     "per_task": 2.106816375,
+     "total": 4.21363275,
+     "spend": 0.020807815677914964,
+     "graded": 0.8854166666666667
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_sol_high",
+     "traffic": 0.0072992700729927005,
+     "per_task": 2.6898910000000003,
+     "total": 2.6898910000000003,
+     "spend": 0.013283254484312227,
+     "graded": 1.0
+    },
+    {
+     "arm": "mini_swe_agent_gpt_5_6_sol_xhigh",
+     "traffic": 0.0072992700729927005,
+     "per_task": 5.3910272500000005,
+     "total": 5.3910272500000005,
+     "spend": 0.02662204040744101,
+     "graded": 1.0
+    }
+   ],
+   "total": 202.50240655833343,
+   "per_task": 1.4781197559002441,
+   "graded": 0.902148843006958,
+   "baseline": {
+    "arm": "always-best (per-seed)",
+    "total": 757.6529180208331,
+    "per_task": 5.530313270225059,
+    "graded": 0.9338904177981193
+   },
+   "ratio": 3.7414514271591206
+  }
+ }
+}
