@@ -1,0 +1,890 @@
+{
+  "benchmark_eval_only": "DeepSWE v1.1",
+  "deep_swe_costs_used_for_fit": false,
+  "deep_swe_outcomes_used_for_fit": false,
+  "default_model": "gpt-5.6-luna__max",
+  "escalate_on_failure": true,
+  "escalation_order": [
+    "gpt-5.6-luna__low",
+    "gpt-5.6-luna__max",
+    "claude-opus-5__max"
+  ],
+  "fit_embedding": "cached text-embedding-3-large",
+  "fit_labels": "per-task graded pass rates, robust-normalized by source arm",
+  "fit_source": "nebius/SWE-rebench free graded coding trajectories",
+  "fit_source_arms": [
+    "openhands:model-unrecorded",
+    "swe-agent:llama-405b",
+    "swe-agent:llama-70b",
+    "swe-agent:llama-8b"
+  ],
+  "fit_source_tasks": 1424,
+  "fit_source_text_sha256": "8c2b7edb9802b6489f5efe80683e1cbe5b64b07443438965f82d3d1ca00ab53b",
+  "knn_k": 64,
+  "pool": [
+    {
+      "cache_write_per_mtok": 1.25,
+      "cached_input_per_mtok": 0.1,
+      "input_per_mtok": 1.0,
+      "name": "gpt-5.6-luna__low",
+      "output_per_mtok": 6.0
+    },
+    {
+      "cache_write_per_mtok": 1.25,
+      "cached_input_per_mtok": 0.1,
+      "input_per_mtok": 1.0,
+      "name": "gpt-5.6-luna__max",
+      "output_per_mtok": 6.0
+    },
+    {
+      "cache_write_per_mtok": 6.25,
+      "cached_input_per_mtok": 0.5,
+      "input_per_mtok": 5.0,
+      "name": "claude-opus-5__max",
+      "output_per_mtok": 25.0
+    }
+  ],
+  "profile_bins": [
+    0.0
+  ],
+  "profile_models": [
+    "gpt-5.6-luna__max",
+    "gpt-5.6-luna__max"
+  ],
+  "route_cutoffs": {
+    "easy_source_ease": 0.38249855347747125,
+    "hard_source_ease": 0.3202581810247649
+  },
+  "route_quantiles": {
+    "easy": 0.55,
+    "hard": 0.05
+  },
+  "schema": "source-transfer-per-turn-v1",
+  "source_cv": {
+    "folds": 5,
+    "grid": [
+      {
+        "k": 8,
+        "mae": 0.27978114468054005,
+        "spearman": 0.10212373139929341
+      },
+      {
+        "k": 16,
+        "mae": 0.27199090888180044,
+        "spearman": 0.11554491493762396
+      },
+      {
+        "k": 32,
+        "mae": 0.26870998453708317,
+        "spearman": 0.12785081451011993
+      },
+      {
+        "k": 64,
+        "mae": 0.2672988608901188,
+        "spearman": 0.14360399170009636
+      }
+    ],
+    "groups": 733,
+    "selected": {
+      "k": 64,
+      "mae": 0.2672988608901188,
+      "spearman": 0.14360399170009636
+    }
+  },
+  "target_query_count": 113,
+  "task_route_metadata": {
+    "abs-module-cache-flags": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.338687,
+      "source_ease": 0.362172,
+      "tier": "normal"
+    },
+    "abs-stepped-slices": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.446049,
+      "source_ease": 0.459267,
+      "tier": "easy"
+    },
+    "actionlint-action-pinning-lint": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.343683,
+      "source_ease": 0.408154,
+      "tier": "easy"
+    },
+    "adaptix-name-mapping-aliases": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.353015,
+      "source_ease": 0.39644,
+      "tier": "easy"
+    },
+    "aiomonitor-task-snapshots-diff": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.366342,
+      "source_ease": 0.401755,
+      "tier": "easy"
+    },
+    "anko-default-function-arguments": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.416758,
+      "source_ease": 0.472127,
+      "tier": "easy"
+    },
+    "anko-typed-variable-bindings": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.368229,
+      "source_ease": 0.46548,
+      "tier": "easy"
+    },
+    "arcane-drift-detection-baselines": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.354091,
+      "source_ease": 0.335211,
+      "tier": "normal"
+    },
+    "arktype-json-schema-refs-dependencies": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.441328,
+      "source_ease": 0.422931,
+      "tier": "easy"
+    },
+    "awilix-async-container-initialization": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.351999,
+      "source_ease": 0.364686,
+      "tier": "normal"
+    },
+    "bandit-incremental-cache-control": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.404008,
+      "source_ease": 0.375222,
+      "tier": "normal"
+    },
+    "bandit-interprocedural-taint-checks": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.36829,
+      "source_ease": 0.441055,
+      "tier": "easy"
+    },
+    "bandit-structured-nosec-directives": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.357083,
+      "source_ease": 0.416665,
+      "tier": "easy"
+    },
+    "boa-hierarchical-evaluation-cancellation": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.363629,
+      "source_ease": 0.399336,
+      "tier": "easy"
+    },
+    "cattrs-partial-structuring-recovery": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.428755,
+      "source_ease": 0.425264,
+      "tier": "easy"
+    },
+    "clack-async-autocomplete-options": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.386082,
+      "source_ease": 0.336997,
+      "tier": "normal"
+    },
+    "claude-code-by-agents-recursive-delegation": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.303507,
+      "source_ease": 0.381023,
+      "tier": "normal"
+    },
+    "cliffy-config-file-parsing": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.372722,
+      "source_ease": 0.421365,
+      "tier": "easy"
+    },
+    "csstree-shorthand-expansion-compression": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.323214,
+      "source_ease": 0.332931,
+      "tier": "normal"
+    },
+    "dasel-html-document-format": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.375164,
+      "source_ease": 0.366393,
+      "tier": "normal"
+    },
+    "dateutil-rfc5545-timezone-interop": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.42988,
+      "source_ease": 0.455172,
+      "tier": "easy"
+    },
+    "drizzle-orm-window-function-builders": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.442729,
+      "source_ease": 0.407649,
+      "tier": "easy"
+    },
+    "dynamodb-toolbox-conditional-attribute-requirements": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.340676,
+      "source_ease": 0.352761,
+      "tier": "normal"
+    },
+    "dynamodb-toolbox-lazy-recursive-schemas": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.34898,
+      "source_ease": 0.357407,
+      "tier": "normal"
+    },
+    "effect-sse-httpapi-streaming": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.338912,
+      "source_ease": 0.382142,
+      "tier": "normal"
+    },
+    "eicrud-keyset-pagination-cursor": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.383968,
+      "source_ease": 0.397413,
+      "tier": "easy"
+    },
+    "etree-xml-diff-patch": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.312831,
+      "source_ease": 0.378225,
+      "tier": "normal"
+    },
+    "expr-try-catch-errors": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.379498,
+      "source_ease": 0.389068,
+      "tier": "easy"
+    },
+    "fastapi-deprecation-response-headers": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.408873,
+      "source_ease": 0.482282,
+      "tier": "easy"
+    },
+    "fastapi-implicit-head-options": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.396468,
+      "source_ease": 0.433387,
+      "tier": "easy"
+    },
+    "fd-deterministic-multi-key-sorting": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.457225,
+      "source_ease": 0.434008,
+      "tier": "easy"
+    },
+    "geo-shapeindex-serialization": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.310372,
+      "source_ease": 0.42494,
+      "tier": "easy"
+    },
+    "go-critic-doc-link-checker": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.388508,
+      "source_ease": 0.382736,
+      "tier": "easy"
+    },
+    "go-genai-streamed-function-args": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.374868,
+      "source_ease": 0.321077,
+      "tier": "normal"
+    },
+    "go-git-worktree-merge-conflicts": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.306449,
+      "source_ease": 0.363404,
+      "tier": "normal"
+    },
+    "goreleaser-retry-publish-auditing": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.43347,
+      "source_ease": 0.32337,
+      "tier": "normal"
+    },
+    "gql-incremental-graphql-delivery": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.39045,
+      "source_ease": 0.471773,
+      "tier": "easy"
+    },
+    "happy-dom-abort-pending-body-reads": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.363788,
+      "source_ease": 0.364003,
+      "tier": "normal"
+    },
+    "happy-dom-deterministic-intersectionobserver": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.319373,
+      "source_ease": 0.352333,
+      "tier": "normal"
+    },
+    "helm-array-merge-strategies": {
+      "base_model": "claude-opus-5__max",
+      "nearest_source_similarity": 0.366402,
+      "source_ease": 0.306982,
+      "tier": "hard"
+    },
+    "helm-unified-manifest-stream": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.385955,
+      "source_ease": 0.357865,
+      "tier": "normal"
+    },
+    "httpx-deterministic-cookie-store": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.399737,
+      "source_ease": 0.421797,
+      "tier": "easy"
+    },
+    "httpx-multipart-response-parsing": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.428494,
+      "source_ease": 0.395484,
+      "tier": "easy"
+    },
+    "httpx-streaming-json-iteration": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.417197,
+      "source_ease": 0.45765,
+      "tier": "easy"
+    },
+    "igel-persist-feature-schema": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.381029,
+      "source_ease": 0.419562,
+      "tier": "easy"
+    },
+    "ink-grid-box-layout": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.363677,
+      "source_ease": 0.334016,
+      "tier": "normal"
+    },
+    "ipython-session-bundle-replay": {
+      "base_model": "claude-opus-5__max",
+      "nearest_source_similarity": 0.378911,
+      "source_ease": 0.311304,
+      "tier": "hard"
+    },
+    "katex-multicolumn-array-spans": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.458686,
+      "source_ease": 0.324809,
+      "tier": "normal"
+    },
+    "kcp-go-multiplexed-kcp-streams": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.254674,
+      "source_ease": 0.358117,
+      "tier": "normal"
+    },
+    "kea-atomic-signal-selectors": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.335578,
+      "source_ease": 0.353342,
+      "tier": "normal"
+    },
+    "kgateway-consistent-hash-policy": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.393296,
+      "source_ease": 0.336799,
+      "tier": "normal"
+    },
+    "kombu-single-active-consumer-priority": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.314002,
+      "source_ease": 0.409631,
+      "tier": "easy"
+    },
+    "kombu-virtual-queue-dead-lettering": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.307514,
+      "source_ease": 0.47325,
+      "tier": "easy"
+    },
+    "koota-composite-trait-aspects": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.292553,
+      "source_ease": 0.357962,
+      "tier": "normal"
+    },
+    "koota-deferred-mutation-buffer": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.307314,
+      "source_ease": 0.346681,
+      "tier": "normal"
+    },
+    "koota-entity-snapshot-rollback": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.36744,
+      "source_ease": 0.340183,
+      "tier": "normal"
+    },
+    "koota-pair-relation-tracking": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.356286,
+      "source_ease": 0.42622,
+      "tier": "easy"
+    },
+    "koota-query-predicates": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.365936,
+      "source_ease": 0.33933,
+      "tier": "normal"
+    },
+    "kysely-window-grouping-helpers": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.361984,
+      "source_ease": 0.392127,
+      "tier": "easy"
+    },
+    "langchain-request-coalescing": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.39059,
+      "source_ease": 0.346711,
+      "tier": "normal"
+    },
+    "mashumaro-flattened-dataclass-fields": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.414266,
+      "source_ease": 0.416009,
+      "tier": "easy"
+    },
+    "meriyah-explicit-resource-declarations": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.329317,
+      "source_ease": 0.37227,
+      "tier": "normal"
+    },
+    "mnamer-daemon-watch-lifecycle": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.345459,
+      "source_ease": 0.35138,
+      "tier": "normal"
+    },
+    "mobly-grouped-test-barriers": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.341899,
+      "source_ease": 0.373869,
+      "tier": "normal"
+    },
+    "narwhals-rolling-window-suite": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.373593,
+      "source_ease": 0.364908,
+      "tier": "normal"
+    },
+    "numba-stencil-boundary-modes": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.416304,
+      "source_ease": 0.37948,
+      "tier": "normal"
+    },
+    "obsidian-linter-auto-table-of-contents": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.327023,
+      "source_ease": 0.361895,
+      "tier": "normal"
+    },
+    "obsidian-linter-link-format-conversion": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.37912,
+      "source_ease": 0.357444,
+      "tier": "normal"
+    },
+    "obsidian-linter-scoped-ignore-markers": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.475706,
+      "source_ease": 0.405044,
+      "tier": "easy"
+    },
+    "ofetch-per-origin-circuit-breaker": {
+      "base_model": "claude-opus-5__max",
+      "nearest_source_similarity": 0.328632,
+      "source_ease": 0.293686,
+      "tier": "hard"
+    },
+    "onedump-dump-encryption-pipeline": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.19884,
+      "source_ease": 0.345844,
+      "tier": "normal"
+    },
+    "opa-rego-rule-profiling": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.218806,
+      "source_ease": 0.377821,
+      "tier": "normal"
+    },
+    "opa-template-string-reconstruction": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.413844,
+      "source_ease": 0.341271,
+      "tier": "normal"
+    },
+    "optique-conditional-option-dependencies": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.392921,
+      "source_ease": 0.386764,
+      "tier": "easy"
+    },
+    "oxvg-structural-selector-preservation": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.398987,
+      "source_ease": 0.393673,
+      "tier": "easy"
+    },
+    "participle-grammar-conflict-analysis": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.348235,
+      "source_ease": 0.356826,
+      "tier": "normal"
+    },
+    "pebble-durability-wait-apis": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.323571,
+      "source_ease": 0.348498,
+      "tier": "normal"
+    },
+    "pest-character-class-coalescing": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.370385,
+      "source_ease": 0.363358,
+      "tier": "normal"
+    },
+    "prometheus-transactional-reload-status": {
+      "base_model": "claude-opus-5__max",
+      "nearest_source_similarity": 0.358298,
+      "source_ease": 0.291094,
+      "tier": "hard"
+    },
+    "prometheus-typed-label-sorting": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.381823,
+      "source_ease": 0.371383,
+      "tier": "normal"
+    },
+    "psd-tools-blend-range-api": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.322237,
+      "source_ease": 0.376663,
+      "tier": "normal"
+    },
+    "pwntools-tube-multiplexing": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.362594,
+      "source_ease": 0.396469,
+      "tier": "easy"
+    },
+    "python-statemachine-state-data-scoping": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.297312,
+      "source_ease": 0.443366,
+      "tier": "easy"
+    },
+    "query-persist-restored-query-state": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.392016,
+      "source_ease": 0.388327,
+      "tier": "easy"
+    },
+    "quill-shared-toolbar-focus": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.360968,
+      "source_ease": 0.320729,
+      "tier": "normal"
+    },
+    "returns-validated-error-accumulation": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.38748,
+      "source_ease": 0.388134,
+      "tier": "easy"
+    },
+    "scc-bounded-memory-spilling": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.384591,
+      "source_ease": 0.349393,
+      "tier": "normal"
+    },
+    "scriggo-method-declarations": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.288981,
+      "source_ease": 0.403853,
+      "tier": "easy"
+    },
+    "skrub-duration-encoding": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.358257,
+      "source_ease": 0.430124,
+      "tier": "easy"
+    },
+    "sql-formatter-bigquery-pipe-formatting": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.428817,
+      "source_ease": 0.358251,
+      "tier": "normal"
+    },
+    "sqlfmt-create-table-ddl-formatting": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.439684,
+      "source_ease": 0.378334,
+      "tier": "normal"
+    },
+    "sqlite-utils-safe-import-checkpoints": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.321456,
+      "source_ease": 0.44712,
+      "tier": "easy"
+    },
+    "superjson-error-stack-serialization": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.348003,
+      "source_ease": 0.461516,
+      "tier": "easy"
+    },
+    "task-task-graph-export": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.350663,
+      "source_ease": 0.386774,
+      "tier": "easy"
+    },
+    "tengo-callable-instance-isolation": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.403314,
+      "source_ease": 0.433646,
+      "tier": "easy"
+    },
+    "tengo-destructuring-bindings": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.37234,
+      "source_ease": 0.4163,
+      "tier": "easy"
+    },
+    "termenv-preserve-ansi-resets": {
+      "base_model": "claude-opus-5__max",
+      "nearest_source_similarity": 0.290118,
+      "source_ease": 0.307522,
+      "tier": "hard"
+    },
+    "testem-bail-on-test-failure": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.338189,
+      "source_ease": 0.332369,
+      "tier": "normal"
+    },
+    "testem-per-launcher-reports": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.383489,
+      "source_ease": 0.390988,
+      "tier": "easy"
+    },
+    "textual-kitty-key-phases": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.407863,
+      "source_ease": 0.327127,
+      "tier": "normal"
+    },
+    "textual-richlog-follow-state": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.396596,
+      "source_ease": 0.373293,
+      "tier": "normal"
+    },
+    "tomlkit-toml-table-converters": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.33634,
+      "source_ease": 0.347821,
+      "tier": "normal"
+    },
+    "true-myth-iterable-collection-combinators": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.341785,
+      "source_ease": 0.433063,
+      "tier": "easy"
+    },
+    "ts-pattern-match-each": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.363604,
+      "source_ease": 0.357089,
+      "tier": "normal"
+    },
+    "updo-policy-alerting": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.353859,
+      "source_ease": 0.369632,
+      "tier": "normal"
+    },
+    "valibot-recursive-schema-composition": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.4193,
+      "source_ease": 0.389329,
+      "tier": "easy"
+    },
+    "vitest-duration-sharding": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.402478,
+      "source_ease": 0.337379,
+      "tier": "normal"
+    },
+    "vulture-persistent-analysis-cache": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.447003,
+      "source_ease": 0.386016,
+      "tier": "easy"
+    },
+    "wasmi-trap-coredumps": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.305457,
+      "source_ease": 0.34151,
+      "tier": "normal"
+    },
+    "wazero-multi-module-snapshots": {
+      "base_model": "claude-opus-5__max",
+      "nearest_source_similarity": 0.301496,
+      "source_ease": 0.319553,
+      "tier": "hard"
+    },
+    "yaegi-go-embed-directives": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.378285,
+      "source_ease": 0.40423,
+      "tier": "easy"
+    },
+    "yjs-map-conflict-detection": {
+      "base_model": "gpt-5.6-luna__max",
+      "nearest_source_similarity": 0.301268,
+      "source_ease": 0.363224,
+      "tier": "normal"
+    },
+    "ytt-jsonpath-query-api": {
+      "base_model": "gpt-5.6-luna__low",
+      "nearest_source_similarity": 0.393554,
+      "source_ease": 0.427204,
+      "tier": "easy"
+    }
+  },
+  "task_routes": {
+    "abs-module-cache-flags": "gpt-5.6-luna__max",
+    "abs-stepped-slices": "gpt-5.6-luna__low",
+    "actionlint-action-pinning-lint": "gpt-5.6-luna__low",
+    "adaptix-name-mapping-aliases": "gpt-5.6-luna__low",
+    "aiomonitor-task-snapshots-diff": "gpt-5.6-luna__low",
+    "anko-default-function-arguments": "gpt-5.6-luna__low",
+    "anko-typed-variable-bindings": "gpt-5.6-luna__low",
+    "arcane-drift-detection-baselines": "gpt-5.6-luna__max",
+    "arktype-json-schema-refs-dependencies": "gpt-5.6-luna__low",
+    "awilix-async-container-initialization": "gpt-5.6-luna__max",
+    "bandit-incremental-cache-control": "gpt-5.6-luna__max",
+    "bandit-interprocedural-taint-checks": "gpt-5.6-luna__low",
+    "bandit-structured-nosec-directives": "gpt-5.6-luna__low",
+    "boa-hierarchical-evaluation-cancellation": "gpt-5.6-luna__low",
+    "cattrs-partial-structuring-recovery": "gpt-5.6-luna__low",
+    "clack-async-autocomplete-options": "gpt-5.6-luna__max",
+    "claude-code-by-agents-recursive-delegation": "gpt-5.6-luna__max",
+    "cliffy-config-file-parsing": "gpt-5.6-luna__low",
+    "csstree-shorthand-expansion-compression": "gpt-5.6-luna__max",
+    "dasel-html-document-format": "gpt-5.6-luna__max",
+    "dateutil-rfc5545-timezone-interop": "gpt-5.6-luna__low",
+    "drizzle-orm-window-function-builders": "gpt-5.6-luna__low",
+    "dynamodb-toolbox-conditional-attribute-requirements": "gpt-5.6-luna__max",
+    "dynamodb-toolbox-lazy-recursive-schemas": "gpt-5.6-luna__max",
+    "effect-sse-httpapi-streaming": "gpt-5.6-luna__max",
+    "eicrud-keyset-pagination-cursor": "gpt-5.6-luna__low",
+    "etree-xml-diff-patch": "gpt-5.6-luna__max",
+    "expr-try-catch-errors": "gpt-5.6-luna__low",
+    "fastapi-deprecation-response-headers": "gpt-5.6-luna__low",
+    "fastapi-implicit-head-options": "gpt-5.6-luna__low",
+    "fd-deterministic-multi-key-sorting": "gpt-5.6-luna__low",
+    "geo-shapeindex-serialization": "gpt-5.6-luna__low",
+    "go-critic-doc-link-checker": "gpt-5.6-luna__low",
+    "go-genai-streamed-function-args": "gpt-5.6-luna__max",
+    "go-git-worktree-merge-conflicts": "gpt-5.6-luna__max",
+    "goreleaser-retry-publish-auditing": "gpt-5.6-luna__max",
+    "gql-incremental-graphql-delivery": "gpt-5.6-luna__low",
+    "happy-dom-abort-pending-body-reads": "gpt-5.6-luna__max",
+    "happy-dom-deterministic-intersectionobserver": "gpt-5.6-luna__max",
+    "helm-array-merge-strategies": "claude-opus-5__max",
+    "helm-unified-manifest-stream": "gpt-5.6-luna__max",
+    "httpx-deterministic-cookie-store": "gpt-5.6-luna__low",
+    "httpx-multipart-response-parsing": "gpt-5.6-luna__low",
+    "httpx-streaming-json-iteration": "gpt-5.6-luna__low",
+    "igel-persist-feature-schema": "gpt-5.6-luna__low",
+    "ink-grid-box-layout": "gpt-5.6-luna__max",
+    "ipython-session-bundle-replay": "claude-opus-5__max",
+    "katex-multicolumn-array-spans": "gpt-5.6-luna__max",
+    "kcp-go-multiplexed-kcp-streams": "gpt-5.6-luna__max",
+    "kea-atomic-signal-selectors": "gpt-5.6-luna__max",
+    "kgateway-consistent-hash-policy": "gpt-5.6-luna__max",
+    "kombu-single-active-consumer-priority": "gpt-5.6-luna__low",
+    "kombu-virtual-queue-dead-lettering": "gpt-5.6-luna__low",
+    "koota-composite-trait-aspects": "gpt-5.6-luna__max",
+    "koota-deferred-mutation-buffer": "gpt-5.6-luna__max",
+    "koota-entity-snapshot-rollback": "gpt-5.6-luna__max",
+    "koota-pair-relation-tracking": "gpt-5.6-luna__low",
+    "koota-query-predicates": "gpt-5.6-luna__max",
+    "kysely-window-grouping-helpers": "gpt-5.6-luna__low",
+    "langchain-request-coalescing": "gpt-5.6-luna__max",
+    "mashumaro-flattened-dataclass-fields": "gpt-5.6-luna__low",
+    "meriyah-explicit-resource-declarations": "gpt-5.6-luna__max",
+    "mnamer-daemon-watch-lifecycle": "gpt-5.6-luna__max",
+    "mobly-grouped-test-barriers": "gpt-5.6-luna__max",
+    "narwhals-rolling-window-suite": "gpt-5.6-luna__max",
+    "numba-stencil-boundary-modes": "gpt-5.6-luna__max",
+    "obsidian-linter-auto-table-of-contents": "gpt-5.6-luna__max",
+    "obsidian-linter-link-format-conversion": "gpt-5.6-luna__max",
+    "obsidian-linter-scoped-ignore-markers": "gpt-5.6-luna__low",
+    "ofetch-per-origin-circuit-breaker": "claude-opus-5__max",
+    "onedump-dump-encryption-pipeline": "gpt-5.6-luna__max",
+    "opa-rego-rule-profiling": "gpt-5.6-luna__max",
+    "opa-template-string-reconstruction": "gpt-5.6-luna__max",
+    "optique-conditional-option-dependencies": "gpt-5.6-luna__low",
+    "oxvg-structural-selector-preservation": "gpt-5.6-luna__low",
+    "participle-grammar-conflict-analysis": "gpt-5.6-luna__max",
+    "pebble-durability-wait-apis": "gpt-5.6-luna__max",
+    "pest-character-class-coalescing": "gpt-5.6-luna__max",
+    "prometheus-transactional-reload-status": "claude-opus-5__max",
+    "prometheus-typed-label-sorting": "gpt-5.6-luna__max",
+    "psd-tools-blend-range-api": "gpt-5.6-luna__max",
+    "pwntools-tube-multiplexing": "gpt-5.6-luna__low",
+    "python-statemachine-state-data-scoping": "gpt-5.6-luna__low",
+    "query-persist-restored-query-state": "gpt-5.6-luna__low",
+    "quill-shared-toolbar-focus": "gpt-5.6-luna__max",
+    "returns-validated-error-accumulation": "gpt-5.6-luna__low",
+    "scc-bounded-memory-spilling": "gpt-5.6-luna__max",
+    "scriggo-method-declarations": "gpt-5.6-luna__low",
+    "skrub-duration-encoding": "gpt-5.6-luna__low",
+    "sql-formatter-bigquery-pipe-formatting": "gpt-5.6-luna__max",
+    "sqlfmt-create-table-ddl-formatting": "gpt-5.6-luna__max",
+    "sqlite-utils-safe-import-checkpoints": "gpt-5.6-luna__low",
+    "superjson-error-stack-serialization": "gpt-5.6-luna__low",
+    "task-task-graph-export": "gpt-5.6-luna__low",
+    "tengo-callable-instance-isolation": "gpt-5.6-luna__low",
+    "tengo-destructuring-bindings": "gpt-5.6-luna__low",
+    "termenv-preserve-ansi-resets": "claude-opus-5__max",
+    "testem-bail-on-test-failure": "gpt-5.6-luna__max",
+    "testem-per-launcher-reports": "gpt-5.6-luna__low",
+    "textual-kitty-key-phases": "gpt-5.6-luna__max",
+    "textual-richlog-follow-state": "gpt-5.6-luna__max",
+    "tomlkit-toml-table-converters": "gpt-5.6-luna__max",
+    "true-myth-iterable-collection-combinators": "gpt-5.6-luna__low",
+    "ts-pattern-match-each": "gpt-5.6-luna__max",
+    "updo-policy-alerting": "gpt-5.6-luna__max",
+    "valibot-recursive-schema-composition": "gpt-5.6-luna__low",
+    "vitest-duration-sharding": "gpt-5.6-luna__max",
+    "vulture-persistent-analysis-cache": "gpt-5.6-luna__low",
+    "wasmi-trap-coredumps": "gpt-5.6-luna__max",
+    "wazero-multi-module-snapshots": "claude-opus-5__max",
+    "yaegi-go-embed-directives": "gpt-5.6-luna__low",
+    "yjs-map-conflict-detection": "gpt-5.6-luna__max",
+    "ytt-jsonpath-query-api": "gpt-5.6-luna__low"
+  }
+}
