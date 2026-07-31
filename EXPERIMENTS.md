@@ -175,6 +175,43 @@ on held-out contests at matched cost?
 - Split by CONTEST (train contests for rollouts, held-out contests for eval).
 - Budget cap: abort if cumulative episode spend exceeds $40.
 
+**Cross-lane note (2026-07-31).** A parallel lane (`exp/per-turn-routing`, worktree
+../coding-router-perturn) probed per-turn routing with the DeepSWE-trained router on
+LCB and found every decision off_distribution (DeepSWE router is OOD on AtCoder
+puzzles) — EXP-008 avoids that confound by using LCB-native kNN priors. Its second
+insight (Kion): a mid-episode switch pays the candidate arm's COLD prefill, so
+divergence is only worth acting on if the confidence gain clears that cost. EXP-008's
+stateless-turn design makes all arms pay full prefill uniformly (cost internalized in
+reward), and the `--sticky` variant (prev-arm one-hot feature) lets the policy LEARN
+switch economics. Caveat carried forward: LCB quality is near-saturated with these
+arms (graded ~0.99 in training iterations), so per-turn results here demonstrate
+mechanism + cost optimization, not the DeepSWE-regime quality-cost tension.
+
+**Training progress.** it0-it3: graded 0.986-0.993 stable, mean reward +0.65 -> +0.78
+(cost per iteration $1.70 -> $1.05 — the policy is learning to shed cost at flat
+quality). Spend so far ~$6 of the $40 cap.
+
+---
+
+## EXP-009 — encoder training-algorithm sweep (QUEUED for GPU0, 2026-07-31)
+
+**Motivation.** Encoder training showed signal (EXP-002 LoRA moved the frontier;
+anchoring diagnosis pending in EXP-003). Compare TRAINING SIGNALS through the same
+soft-kNN policy, same protocol, 150 steps, beta=0: exact expected reward (control),
+pairwise utility ranking (EquiRouter-flavored, robust to near-ties), GRPO sampled
+estimator (does gradient noise regularize?), NCA metric learning (representation-only
+control: no reward signal, positives = tasks with correlated arm-outcome profiles).
+`rl/train_softknn_v4.py`, 4 algos x 6 seeds, launches when EXP-003 vacates GPU0.
+
+## EXP-010 — per-turn router variants vs current bests (READY, awaits EXP-008)
+
+**Comparison set, all LIVE on held-out contests (greedy):** trained per-turn linear
+policy, turn0-frozen control (per-task routing with the same policy), hand ladder
+cascade (cheap->escalate on failing public tests), static nano@high, static
+opus@medium. Plus a `--sticky` retrain (prev-arm feature). Success metric: per-turn
+beats turn0-frozen at matched-or-better graded — that is the direct per-task-vs-
+per-turn granularity answer on live episodes.
+
 ## EXP-006 — 8B anchored LoRA (QUEUED after EXP-005, 2026-07-31)
 
 **Setup.** `train_softknn_v2_150.py` (150 steps), lora mode, 8b, beta=0.2, 6 seeds,
