@@ -4,30 +4,28 @@ Instructions for any agent (or human) making changes in this repo.
 
 ## Layout
 
-All source lives flat in `router/`, one package, eight files:
+This repo is the PRODUCT: the deployable router and nothing else. Two code files:
 
 | file | contents |
 |---|---|
-| `router_core.py` | pricing table, `Router`/`Decision` (inference), `Matrix`/policies (CV, races) |
-| `harness.py` | unified OpenAI+Anthropic agent client, E2B sandbox exec, LiveCodeBench eval |
+| `router_core.py` | canonical price table (`Price`/`Arm`) + artifact inference (`Router`/`Decision`) |
 | `serve.py` | `python -m router.serve` — one command, one OpenAI-compatible endpoint |
-| `export.py` | freezes the router into `results/router_v0.{json,npz}`, self-tests the artifact |
-| `datasets.py` | SWE-rebench + DeepSWE dataset loaders |
-| `benchmarks.py` | CLI: fetch-swebench-matrix, transfer-swebench, run-lcb, smoke-agent |
-| `experiments.py` | CLI: holdout-deepswe, exp1-holdout9, race-router, race-deepswe, probe-arms |
-| `analysis.py` | CLI: analyze-phase1, headroom, price-traces, extract-traces |
+
+The research half that built and validates this — dataset loaders, the measurement
+harness (`AgentRunner`/E2B/LiveCodeBench), CV policies, benchmarks, artifact export —
+lives in world-model-optimizer's `packages/router-lab`, which depends on this repo.
+New research/eval code goes THERE, never here. The shipped artifacts
+(`results/router_v0*.{json,npz}`) are build outputs produced by the lab's exporter.
 
 ## Hard rules
 
 - **1000 lines per source file, max.** Applies to `.py` files under `router/`. Does not apply to
   data/config files (`results/`, `data/`, `*.json`, `*.jsonl`, `*.npz`, `*.log`, `uv.lock`).
-- **8 files max.** This repo was deliberately consolidated from 24 files down to 7, then 8 when
-  `serve.py` was added (previously also had separate `loaders/`, `harness/`, `scripts/`
-  directories that no longer exist). Before creating a new file, put the code in the existing
-  file it belongs to per the table above. A new CLI subcommand goes in whichever of
-  benchmarks/experiments/analysis it's closest to in kind. If nothing above fits and you're
-  certain a new file is warranted, say so explicitly and explain why consolidation doesn't
-  work, rather than defaulting to a new file.
+- **2 code files max.** This repo went from 24 files to 8 by consolidation, then to 2 when the
+  research half moved to wmo's `packages/router-lab`. Before creating a new file here, ask
+  whether the code is product (belongs in one of the two files above) or research (belongs in
+  router-lab). If you're certain a new product file is warranted, say so explicitly and explain
+  why, rather than defaulting to a new file.
 - If consolidating would push a file over 1000 lines, that's a signal to split by genuine topic
   (dataset loaders were briefly two files for exactly this reason) — not to abandon the limit.
 
@@ -95,24 +93,12 @@ built-in "max lines per file" rule, so the 1000-line rule is enforced by this ch
 find router -name "*.py" | xargs wc -l | awk '$1 > 1000 && $2 != "total" {print; exit 1}'
 ```
 
-**ty baseline: 55 known diagnostics, not bugs, don't chase them to zero without asking first.**
-Per-file: analysis.py 3, datasets.py 2, experiments.py 9, export.py 3, harness.py 4,
-router_core.py 12, serve.py 27 (the rest have none). (Was 56 until the print->logging pass
-removed serve.py's `sys.stdout.reconfigure` line, which carried one diagnostic.) They trace to a small number of
-intentional dynamic-typing patterns a static checker can't see through, e.g.:
-  1. `Matrix.emb: np.ndarray | None = None` in `router_core.py` — `Matrix` is built once via
-     `build()` and then mutated in place by `embed()`; `emb` is genuinely `None` between those
-     two calls but always set by the time downstream code reads it. Fixing this "properly" means
-     restructuring the two-phase construction, not adding a type: ignore.
-  2. `AgentRunner._client: Anthropic | OpenAI` in `harness.py` — the concrete type is picked by
-     `arm.provider` at construction time and used correctly downstream via that same provider
-     check, but ty can't link the two attributes to narrow the union.
-  3. `serve.py` carries most of the count: `ChatMessage.content: str | None` participates in
-     string concatenation (`system + "\n\n" + m.content`) in the Chat Completions translation
-     functions — a real latent gap (a `None` content would crash there) that predates this file's
-     Pydantic types (the same crash risk existed, invisibly, behind an untyped `dict` access
-     before), not something introduced by typing it properly. Fixing it means deciding what an
-     empty/absent message content should mean, which is a product decision, not a type fix.
+**ty baseline: 26 known diagnostics (all in serve.py), not bugs, don't chase them to zero
+without asking first.** They trace to intentional dynamic-typing patterns a static checker
+can't see through — chiefly `ChatMessage.content: str | None` participating in string
+concatenation in the Chat Completions translation functions (a real but pre-existing latent
+gap: the same crash risk existed invisibly behind untyped dict access before Pydantic typing
+made it visible; fixing it means deciding what absent content should mean, a product decision).
 If this count grows for a new, different reason, treat that as a real signal worth looking at.
 Before changing this number, verify a claimed baseline shift the same way it was established
 here: diff `ty check` output against a stash of the prior state, not just eyeball the total.

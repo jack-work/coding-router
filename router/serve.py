@@ -30,12 +30,22 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from router.harness import load_env
 from router.router_core import STANDARD, Decision, Router
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.local"
 DISPATCH_MAX_TOKENS = 32_000
+
+
+def load_env(path: pathlib.Path | None = None) -> None:
+    """Load KEY=VALUE lines from `.env.local` into the environment (existing vars win)."""
+    p = path or ENV_FILE
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
 logger = logging.getLogger(__name__)
 
