@@ -15,8 +15,11 @@ import json
 import logging
 import os
 import pathlib
+import queue
 import sys
+import threading
 import time
+import urllib.request
 import uuid
 from typing import Any
 
@@ -28,7 +31,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from router.harness import load_env
-from router.router_core import Decision, Router
+from router.router_core import STANDARD, Decision, Router
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.local"
@@ -116,6 +119,14 @@ class Choice(BaseModel):
     finish_reason: str | None = None
 
 
+class TokenUsage(BaseModel):
+    """Token counts for one dispatched request, Chat Completions `usage` shape."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
 class ChatCompletionResponse(BaseModel):
     """A non-streaming Chat Completions response body."""
 
@@ -124,6 +135,7 @@ class ChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: list[Choice]
+    usage: TokenUsage | None = None
 
 
 class ChunkChoice(BaseModel):
@@ -198,6 +210,93 @@ def ensure_key(env_var: str, dashboard_url: str, validate) -> str:
     ENV_FILE.write_text("\n".join(lines) + "\n")
     logger.info(f"saved to {ENV_FILE}\n")
     return key
+
+
+# ---------------------------------------------------------------- telemetry
+# STRICTLY metadata. WE NEVER UPLOAD TRACES OR PII FROM A USER -- see AGENTS.md's
+# Telemetry section for the binding property allowlist (counts, durations, model ids,
+# booleans, estimated costs; never anything user-authored). Deliberately hand-rolled
+# on stdlib (queue + daemon thread + urllib) instead of the PostHog SDK: zero added
+# dependencies, zero hot-path latency (capture() only enqueues), and the entire
+# privacy surface is this one auditable block. The key below is a PostHog PUBLIC
+# write-only project key -- standard practice to ship in source, not a secret.
+POSTHOG_KEY = "phc_BKPc6suQaTaWWDftyThB3pVPHfK7bEMmpo3UNbyMcXdm"
+POSTHOG_HOST = "https://us.i.posthog.com"
+
+_telemetry_q: queue.Queue[dict[str, Any]] | None = None
+
+
+def telemetry_enabled() -> bool:
+    """True unless ROUTER_TELEMETRY_DISABLED or the standard DO_NOT_TRACK is set."""
+    off = ("1", "true", "yes", "on")
+    return not (os.environ.get("ROUTER_TELEMETRY_DISABLED", "").lower() in off
+                or os.environ.get("DO_NOT_TRACK", "").lower() in off)
+
+
+def _anon_id() -> str:
+    """Get-or-create the random install id (a UUID mapping to nothing) in .env.local."""
+    load_env(ENV_FILE)
+    existing = os.environ.get("ROUTER_ANALYTICS_ID")
+    if existing:
+        return existing
+    anon = uuid.uuid4().hex
+    os.environ["ROUTER_ANALYTICS_ID"] = anon
+    prior = ENV_FILE.read_text() if ENV_FILE.exists() else ""
+    ENV_FILE.write_text(prior.rstrip("\n") + f"\nROUTER_ANALYTICS_ID={anon}\n" if prior
+                        else f"ROUTER_ANALYTICS_ID={anon}\n")
+    return anon
+
+
+def _post_event(payload: dict[str, Any]) -> int:
+    """POST one event to PostHog; returns the HTTP status. Raises on network failure."""
+    req = urllib.request.Request(
+        f"{POSTHOG_HOST}/i/v0/e/", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status
+
+
+def _telemetry_worker() -> None:
+    """Drain the queue forever, swallowing failures -- telemetry may never break serving."""
+    assert _telemetry_q is not None
+    while True:
+        payload = _telemetry_q.get()
+        try:
+            _post_event(payload)
+        except Exception as e:  # noqa: BLE001 -- drop the event, never disturb the server
+            logger.debug(f"telemetry: dropped event ({type(e).__name__})")
+
+
+def start_telemetry() -> None:
+    """Start the background sender (call once at startup, only when enabled)."""
+    global _telemetry_q
+    _telemetry_q = queue.Queue(maxsize=256)
+    threading.Thread(target=_telemetry_worker, daemon=True, name="telemetry").start()
+
+
+def capture(event: str, properties: dict[str, Any]) -> None:
+    """Enqueue one metadata-only event; never blocks, drops silently when full/disabled."""
+    if _telemetry_q is None:
+        return
+    payload = {"api_key": POSTHOG_KEY, "event": event, "distinct_id": _anon_id(),
+               "properties": properties}
+    try:
+        _telemetry_q.put_nowait(payload)
+    except queue.Full:
+        pass
+
+
+def est_cost_usd(model: str, usage: TokenUsage) -> float | None:
+    """Estimate one request's USD cost from the price table, or None if unpriced.
+
+    Approximation: bills all prompt tokens at the uncached input rate (cache-read
+    splits aren't tracked per-request here), so real cost is usually LOWER.
+    """
+    provider = "anthropic" if model.startswith("claude") else "openai"
+    price = STANDARD.get(provider, {}).get(model)
+    if price is None:
+        return None
+    return (usage.prompt_tokens * price.inp + usage.completion_tokens * price.out) / 1_000_000
 
 
 # ---------------------------------------------------------------- Chat Completions -> OpenAI Responses
@@ -333,8 +432,9 @@ def anthropic_response_to_message(content: list) -> ChatMessage:
 
 
 def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTool] | None,
-            openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic) -> ChatMessage:
-    """Call the real provider for a routed decision and return a Chat Completions message.
+            openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic,
+            ) -> tuple[ChatMessage, TokenUsage]:
+    """Call the real provider for a routed decision and return the reply plus token usage.
 
     Args:
         decision: A `router_core.Decision` naming the chosen arm.
@@ -344,7 +444,9 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
         anthropic_client: Client used when the decision picked an Anthropic arm.
 
     Returns:
-        The provider's reply as a Chat Completions `ChatMessage`.
+        The provider's reply as a Chat Completions `ChatMessage`, and its `TokenUsage`
+        (prompt tokens include cache reads/writes so counts are comparable across
+        providers -- Anthropic reports those separately, OpenAI folds them in).
     """
     if decision.model.startswith("claude"):
         system, anthropic_messages = messages_to_anthropic(messages)
@@ -359,17 +461,25 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
                 messages=anthropic_messages, max_tokens=DISPATCH_MAX_TOKENS,
                 tools=tools_to_anthropic(tools), **kwargs, **decision.request_kwargs) as stream:
             r = stream.get_final_message()
-        return anthropic_response_to_message(r.content)
+        prompt = (r.usage.input_tokens + (getattr(r.usage, "cache_read_input_tokens", 0) or 0)
+                  + (getattr(r.usage, "cache_creation_input_tokens", 0) or 0))
+        usage = TokenUsage(prompt_tokens=prompt, completion_tokens=r.usage.output_tokens,
+                           total_tokens=prompt + r.usage.output_tokens)
+        return anthropic_response_to_message(r.content), usage
 
     system, input_items = messages_to_responses_input(messages)
     r = openai_client.responses.create(
         instructions=system, input=input_items, max_output_tokens=DISPATCH_MAX_TOKENS,
         tools=tools_to_responses(tools), **decision.request_kwargs)
-    return responses_output_to_message(r.output)
+    usage = TokenUsage(prompt_tokens=getattr(r.usage, "input_tokens", 0) or 0,
+                       completion_tokens=getattr(r.usage, "output_tokens", 0) or 0,
+                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0)
+    return responses_output_to_message(r.output), usage
 
 
 def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
-                            tools: list[ChatTool] | None, client: openai.OpenAI) -> ChatMessage:
+                            tools: list[ChatTool] | None, client: openai.OpenAI,
+                            ) -> tuple[ChatMessage, TokenUsage]:
     """Call the routed model through OpenRouter instead of the provider directly.
 
     OpenRouter speaks the same Chat Completions dialect the incoming request already
@@ -385,14 +495,17 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
         client: An `openai.OpenAI` client pointed at OpenRouter's base_url.
 
     Returns:
-        The provider's reply as a Chat Completions `ChatMessage`.
+        The provider's reply as a Chat Completions `ChatMessage`, and its `TokenUsage`.
     """
     family = "anthropic" if decision.model.startswith("claude") else "openai"
     raw_messages = [m.model_dump(exclude_none=True) for m in messages]
     raw_tools = [t.model_dump(exclude_none=True) for t in tools] if tools else None
     r = client.chat.completions.create(
         model=f"{family}/{decision.model}", messages=raw_messages, tools=raw_tools)
-    return ChatMessage.model_validate(r.choices[0].message.model_dump(exclude_none=True))
+    usage = TokenUsage(prompt_tokens=getattr(r.usage, "prompt_tokens", 0) or 0,
+                       completion_tokens=getattr(r.usage, "completion_tokens", 0) or 0,
+                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0)
+    return ChatMessage.model_validate(r.choices[0].message.model_dump(exclude_none=True)), usage
 
 
 def message_preview(m: ChatMessage) -> str:
@@ -586,12 +699,15 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
         messages = [ChatMessage.model_validate(m) for m in body["messages"]]
         stream = bool(body.get("stream"))
 
+        t0 = time.perf_counter()
         trajectory = build_trajectory(messages, openai_client, summary_model, summarize_middle)
         decision = router.route_embedding(embed_text(trajectory))
+        t_routed = time.perf_counter()
         tools = [parse_chat_tool(t) for t in (body.get("tools") or [])] or None
-        message = (dispatch_via_openrouter(decision, messages, tools, openrouter_client)
-                   if openrouter_client
-                   else dispatch(decision, messages, tools, openai_client, anthropic_client))
+        message, usage = (dispatch_via_openrouter(decision, messages, tools, openrouter_client)
+                          if openrouter_client
+                          else dispatch(decision, messages, tools, openai_client, anthropic_client))
+        t_done = time.perf_counter()
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
@@ -600,10 +716,40 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
                     f"({len(messages)} messages in, traj={len(trajectory)}ch)")
         finish_reason = "tool_calls" if message.tool_calls else "stop"
 
+        # Metadata-only telemetry (see the telemetry section + AGENTS.md): counts,
+        # durations, model ids, and cost estimates -- never any request content.
+        cost = est_cost_usd(decision.model, usage)
+        # Savings vs the always-strongest-arm baseline, priced on THIS request's
+        # token counts -- the standard counterfactual (the baseline model would
+        # produce somewhat different output lengths).
+        baseline = est_cost_usd(router.arm_spec[router.arms[router.fallback]].model, usage)
+        provider_s = t_done - t_routed
+        capture("request_routed", {
+            "model": decision.model, "effort": decision.effort,
+            "p_solve": round(decision.p_solve, 3),
+            "off_distribution": decision.off_distribution,
+            "fallback_used": decision.fallback_used,
+            "via": "openrouter" if openrouter_client else "direct",
+            "stream": stream, "n_messages": len(messages),
+            "trajectory_chars": len(trajectory),
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "routing_s": round(t_routed - t0, 3), "provider_s": round(provider_s, 3),
+            # Upstream dispatch is non-streaming, so first token == full response;
+            # ttft gets its own honest meaning if/when passthrough streaming lands.
+            "ttft_s": round(t_done - t0, 3), "total_s": round(t_done - t0, 3),
+            "tps": (round(usage.completion_tokens / provider_s, 1)
+                    if provider_s > 0 and usage.completion_tokens else None),
+            "cost_usd": cost, "baseline_cost_usd": baseline,
+            "est_savings_usd": (round(baseline - cost, 6)
+                                if cost is not None and baseline is not None else None),
+        })
+
         if not stream:
             resp = ChatCompletionResponse(
                 id=completion_id, created=created, model=decision.model,
-                choices=[Choice(index=0, message=message, finish_reason=finish_reason)])
+                choices=[Choice(index=0, message=message, finish_reason=finish_reason)],
+                usage=usage)
             return JSONResponse(resp.model_dump(exclude_none=True))
 
         def sse():
@@ -688,6 +834,15 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
                    summary_model=summary_model, summarize_middle=summarize)
     logger.info(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}, "
                 f"summarize={summarize}")
+
+    if telemetry_enabled():
+        start_telemetry()
+        capture("server_started", {"n_arms": len(router.arms), "via": via,
+                                   "summarize": summarize})
+        logger.info("telemetry: anonymous metadata-only usage stats ON "
+                    "(opt out: ROUTER_TELEMETRY_DISABLED=1; policy in AGENTS.md/README)")
+    else:
+        logger.info("telemetry: disabled")
 
     logger.info(f"\nrouter serving at http://127.0.0.1:{port}/v1")
     print_opencode_config(port)
