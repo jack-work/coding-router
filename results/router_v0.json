@@ -1,0 +1,572 @@
+{
+ "version": "v0",
+ "embed_model": "text-embedding-3-large",
+ "arms": [
+  "mini_swe_agent_claude_fable_5_high",
+  "mini_swe_agent_claude_fable_5_low",
+  "mini_swe_agent_claude_fable_5_max",
+  "mini_swe_agent_claude_fable_5_medium",
+  "mini_swe_agent_claude_fable_5_xhigh",
+  "mini_swe_agent_claude_opus_4_8_high",
+  "mini_swe_agent_claude_opus_4_8_low",
+  "mini_swe_agent_claude_opus_4_8_max",
+  "mini_swe_agent_claude_opus_4_8_medium",
+  "mini_swe_agent_claude_opus_4_8_xhigh",
+  "mini_swe_agent_claude_opus_5_high",
+  "mini_swe_agent_claude_opus_5_low",
+  "mini_swe_agent_claude_opus_5_max",
+  "mini_swe_agent_claude_opus_5_medium",
+  "mini_swe_agent_claude_opus_5_xhigh",
+  "mini_swe_agent_claude_sonnet_4_6_high",
+  "mini_swe_agent_claude_sonnet_5_high",
+  "mini_swe_agent_claude_sonnet_5_low",
+  "mini_swe_agent_claude_sonnet_5_max",
+  "mini_swe_agent_claude_sonnet_5_medium",
+  "mini_swe_agent_claude_sonnet_5_xhigh",
+  "mini_swe_agent_gpt_5_4_xhigh",
+  "mini_swe_agent_gpt_5_5_high",
+  "mini_swe_agent_gpt_5_5_low",
+  "mini_swe_agent_gpt_5_5_medium",
+  "mini_swe_agent_gpt_5_5_xhigh",
+  "mini_swe_agent_gpt_5_6_luna_high",
+  "mini_swe_agent_gpt_5_6_luna_low",
+  "mini_swe_agent_gpt_5_6_luna_max",
+  "mini_swe_agent_gpt_5_6_luna_medium",
+  "mini_swe_agent_gpt_5_6_luna_xhigh",
+  "mini_swe_agent_gpt_5_6_sol_high",
+  "mini_swe_agent_gpt_5_6_sol_low",
+  "mini_swe_agent_gpt_5_6_sol_max",
+  "mini_swe_agent_gpt_5_6_sol_medium",
+  "mini_swe_agent_gpt_5_6_sol_xhigh",
+  "mini_swe_agent_gpt_5_6_terra_high",
+  "mini_swe_agent_gpt_5_6_terra_low",
+  "mini_swe_agent_gpt_5_6_terra_max",
+  "mini_swe_agent_gpt_5_6_terra_medium",
+  "mini_swe_agent_gpt_5_6_terra_xhigh"
+ ],
+ "arm_spec": {
+  "mini_swe_agent_claude_fable_5_high": {
+   "model": "claude-fable-5",
+   "effort": "high",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-fable-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_claude_fable_5_low": {
+   "model": "claude-fable-5",
+   "effort": "low",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-fable-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_claude_fable_5_max": {
+   "model": "claude-fable-5",
+   "effort": "max",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-fable-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_claude_fable_5_medium": {
+   "model": "claude-fable-5",
+   "effort": "medium",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-fable-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_claude_fable_5_xhigh": {
+   "model": "claude-fable-5",
+   "effort": "xhigh",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-fable-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_4_8_high": {
+   "model": "claude-opus-4-8",
+   "effort": "high",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-4-8",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_4_8_low": {
+   "model": "claude-opus-4-8",
+   "effort": "low",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-4-8",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_4_8_max": {
+   "model": "claude-opus-4-8",
+   "effort": "max",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-4-8",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_4_8_medium": {
+   "model": "claude-opus-4-8",
+   "effort": "medium",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-4-8",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_4_8_xhigh": {
+   "model": "claude-opus-4-8",
+   "effort": "xhigh",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-4-8",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_5_high": {
+   "model": "claude-opus-5",
+   "effort": "high",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_5_low": {
+   "model": "claude-opus-5",
+   "effort": "low",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_5_max": {
+   "model": "claude-opus-5",
+   "effort": "max",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_5_medium": {
+   "model": "claude-opus-5",
+   "effort": "medium",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_claude_opus_5_xhigh": {
+   "model": "claude-opus-5",
+   "effort": "xhigh",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-opus-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_claude_sonnet_4_6_high": {
+   "model": "claude-sonnet-4-6",
+   "effort": "high",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-sonnet-4-6",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_claude_sonnet_5_high": {
+   "model": "claude-sonnet-5",
+   "effort": "high",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-sonnet-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_claude_sonnet_5_low": {
+   "model": "claude-sonnet-5",
+   "effort": "low",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-sonnet-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_claude_sonnet_5_max": {
+   "model": "claude-sonnet-5",
+   "effort": "max",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-sonnet-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_claude_sonnet_5_medium": {
+   "model": "claude-sonnet-5",
+   "effort": "medium",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-sonnet-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_claude_sonnet_5_xhigh": {
+   "model": "claude-sonnet-5",
+   "effort": "xhigh",
+   "provider": "anthropic",
+   "request_kwargs": {
+    "model": "claude-sonnet-5",
+    "thinking": {
+     "type": "adaptive"
+    },
+    "output_config": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_4_xhigh": {
+   "model": "gpt-5.4",
+   "effort": "xhigh",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.4",
+    "reasoning": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_5_high": {
+   "model": "gpt-5.5",
+   "effort": "high",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.5",
+    "reasoning": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_5_low": {
+   "model": "gpt-5.5",
+   "effort": "low",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.5",
+    "reasoning": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_5_medium": {
+   "model": "gpt-5.5",
+   "effort": "medium",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.5",
+    "reasoning": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_5_xhigh": {
+   "model": "gpt-5.5",
+   "effort": "xhigh",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.5",
+    "reasoning": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_luna_high": {
+   "model": "gpt-5.6-luna",
+   "effort": "high",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-luna",
+    "reasoning": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_luna_low": {
+   "model": "gpt-5.6-luna",
+   "effort": "low",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-luna",
+    "reasoning": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_luna_max": {
+   "model": "gpt-5.6-luna",
+   "effort": "max",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-luna",
+    "reasoning": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_luna_medium": {
+   "model": "gpt-5.6-luna",
+   "effort": "medium",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-luna",
+    "reasoning": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_luna_xhigh": {
+   "model": "gpt-5.6-luna",
+   "effort": "xhigh",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-luna",
+    "reasoning": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_sol_high": {
+   "model": "gpt-5.6-sol",
+   "effort": "high",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_sol_low": {
+   "model": "gpt-5.6-sol",
+   "effort": "low",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_sol_max": {
+   "model": "gpt-5.6-sol",
+   "effort": "max",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_sol_medium": {
+   "model": "gpt-5.6-sol",
+   "effort": "medium",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_sol_xhigh": {
+   "model": "gpt-5.6-sol",
+   "effort": "xhigh",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+     "effort": "xhigh"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_terra_high": {
+   "model": "gpt-5.6-terra",
+   "effort": "high",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-terra",
+    "reasoning": {
+     "effort": "high"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_terra_low": {
+   "model": "gpt-5.6-terra",
+   "effort": "low",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-terra",
+    "reasoning": {
+     "effort": "low"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_terra_max": {
+   "model": "gpt-5.6-terra",
+   "effort": "max",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-terra",
+    "reasoning": {
+     "effort": "max"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_terra_medium": {
+   "model": "gpt-5.6-terra",
+   "effort": "medium",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-terra",
+    "reasoning": {
+     "effort": "medium"
+    }
+   }
+  },
+  "mini_swe_agent_gpt_5_6_terra_xhigh": {
+   "model": "gpt-5.6-terra",
+   "effort": "xhigh",
+   "provider": "openai",
+   "request_kwargs": {
+    "model": "gpt-5.6-terra",
+    "reasoning": {
+     "effort": "xhigh"
+    }
+   }
+  }
+ },
+ "k": 12,
+ "tau": 0.5,
+ "sim_floor": 0.35,
+ "fallback_arm_index": 10,
+ "provenance": "DeepSWE v1.1, 41 OpenAI/Anthropic arms x 110 tasks over 88 repos. Labels are DeepSWE's published per-trial f2p_passed/f2p_total and cost_usd; we ran no episodes. Nested repo-grouped CV measured 2.15x cheaper than always-mini_swe_agent_claude_opus_5_high at graded 0.933 vs 0.954, cost-ratio 95% CI [1.87,2.46], graded-delta 95% CI [-0.044,+0.000].",
+ "scope_warning": "INPUT SHAPE MATTERS. Fit on repo-issue statements of p10=955 / p50=1976 / p90=3450 characters. In-distribution nearest-neighbour cosine similarity runs min 0.266 / p50 0.439; sim_floor=0.35 is the p10, so it abstains on the least-covered ~10% of in-distribution tasks. Short one-line prompts score 0.14-0.34 and will ALWAYS abstain to the strongest arm -- safe, but no saving. Long-horizon tasks only (median 61 agent steps). NOT validated on short interactive requests or on any held-out benchmark. Always check Decision.off_distribution before trusting a route.",
+ "measured_artifact_behaviour": "The shipped artifact, re-run under the same repo-grouped folds WITH the sim_floor guard active, gives 1.81x cheaper at graded 0.939 (18/110 tasks escalated as off-distribution). The 2.15x figure is the ungated policy. The guard trades 0.34x of saving for +0.006 graded and a refusal-to-guess property.",
+ "n_tasks": 110,
+ "n_repos": 88
+}

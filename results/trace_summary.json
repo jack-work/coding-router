@@ -1,0 +1,248 @@
+{
+ "total_sessions_seen": 1655,
+ "sessions_with_usable_ask": 1631,
+ "claude-code": {
+  "sessions": 74,
+  "ask_chars": {
+   "n": 74,
+   "min": 33,
+   "max": 56315,
+   "mean": 4694.9,
+   "p50": 2779,
+   "p90": 7186,
+   "p99": 56315
+  },
+  "max_turns": {
+   "n": 74,
+   "min": 1,
+   "max": 57,
+   "mean": 16.0,
+   "p50": 10,
+   "p90": 39,
+   "p99": 57
+  },
+  "out_tok": {
+   "n": 74,
+   "min": 0,
+   "max": 87377,
+   "mean": 11069.5,
+   "p50": 7443,
+   "p90": 23160,
+   "p99": 87377
+  },
+  "cache_read": {
+   "n": 74,
+   "min": 0,
+   "max": 7529007,
+   "mean": 1576273.6,
+   "p50": 1193338,
+   "p90": 3372598,
+   "p99": 7529007
+  },
+  "repos": [
+   [
+    "markdown-distiller",
+    14
+   ],
+   [
+    "debertav3-modernized",
+    12
+   ],
+   [
+    "falcon-ocr.rs",
+    12
+   ],
+   [
+    "phasesweep",
+    10
+   ],
+   [
+    "NeoBERT",
+    9
+   ],
+   [
+    "megalodon-jax",
+    8
+   ],
+   [
+    "chomp-gamma",
+    6
+   ],
+   [
+    "local_stability",
+    1
+   ],
+   [
+    "dataset-archive-otf",
+    1
+   ],
+   [
+    "localpaste.rs",
+    1
+   ]
+  ],
+  "models": [
+   [
+    "claude-sonnet-5",
+    55
+   ],
+   [
+    "claude-opus-4-8",
+    8
+   ],
+   [
+    "claude-opus-5",
+    4
+   ],
+   [
+    "claude-sonnet-4-6",
+    4
+   ],
+   [
+    "claude-fable-5",
+    2
+   ],
+   [
+    null,
+    1
+   ]
+  ],
+  "turn_buckets": {
+   "1 (trivial)": 6,
+   "2-5": 16,
+   "6-20": 30,
+   "21-100": 22,
+   ">100 (epic)": 0
+  }
+ },
+ "codex": {
+  "sessions": 1557,
+  "ask_chars": {
+   "n": 1557,
+   "min": 23,
+   "max": 95796,
+   "mean": 10257.6,
+   "p50": 8898,
+   "p90": 20308,
+   "p99": 25513
+  },
+  "max_turns": {
+   "n": 1557,
+   "min": 0,
+   "max": 1976,
+   "mean": 46.7,
+   "p50": 2,
+   "p90": 143,
+   "p99": 573
+  },
+  "out_tok": {
+   "n": 1557,
+   "min": 0,
+   "max": 0,
+   "mean": 0.0,
+   "p50": 0,
+   "p90": 0,
+   "p99": 0
+  },
+  "cache_read": {
+   "n": 1557,
+   "min": 0,
+   "max": 0,
+   "mean": 0.0,
+   "p50": 0,
+   "p90": 0,
+   "p99": 0
+  },
+  "repos": [
+   [
+    "falcon-ocr.rs",
+    243
+   ],
+   [
+    "phasesweep",
+    211
+   ],
+   [
+    "chomp-gamma",
+    161
+   ],
+   [
+    "NeoBERT",
+    156
+   ],
+   [
+    "debertav3-modernized",
+    149
+   ],
+   [
+    "megalodon-jax",
+    86
+   ],
+   [
+    "dataset-archive-otf",
+    82
+   ],
+   [
+    "parakit",
+    76
+   ],
+   [
+    "paper-graph-vis",
+    66
+   ],
+   [
+    "parameter-golf",
+    50
+   ]
+  ],
+  "models": [
+   [
+    "gpt-5.6-sol",
+    359
+   ],
+   [
+    "gpt-5.5",
+    345
+   ],
+   [
+    "codex-auto-review",
+    290
+   ],
+   [
+    "gpt-5.4",
+    171
+   ],
+   [
+    "gpt-5.3-codex",
+    109
+   ],
+   [
+    "gpt-5.2-codex",
+    106
+   ],
+   [
+    "gpt-5-codex",
+    53
+   ],
+   [
+    "gpt-5.1-codex-mini",
+    41
+   ],
+   [
+    "gpt-5.3-codex-spark",
+    26
+   ],
+   [
+    "gpt-5.1-codex-max",
+    21
+   ]
+  ],
+  "turn_buckets": {
+   "1 (trivial)": 716,
+   "2-5": 240,
+   "6-20": 192,
+   "21-100": 207,
+   ">100 (epic)": 202
+  }
+ }
+}

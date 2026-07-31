@@ -1,0 +1,13 @@
+.env.local
+.venv/
+data/
+results/episodes/
+results/contaminated_capbug/
+results/local_prefix/
+results/deepswe_acts_*.npz
+results/*.log
+__pycache__/
+*.pyc
+.DS_Store
+.ruff_cache/
+.ty_cache/
