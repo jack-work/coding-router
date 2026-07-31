@@ -210,20 +210,38 @@ class Decision:
 
 class Router:
     def __init__(self, artifact_dir: str | pathlib.Path, *,
-                artifact_json: str = ARTIFACT_JSON, artifact_npz: str = ARTIFACT_NPZ):
+                artifact_json: str = ARTIFACT_JSON, artifact_npz: str = ARTIFACT_NPZ,
+                providers: set[str] | None = None):
+        """`providers`, if given (e.g. {"openai"}), restricts the arm pool to just those
+        providers -- filtered once here so route_embedding()/route() need no changes and
+        can't pick a disallowed arm. Cheapest-first order and the fallback arm are both
+        recomputed within the restricted pool."""
         p = pathlib.Path(artifact_dir)
         meta = json.loads((p / artifact_json).read_text())
         arr = np.load(p / artifact_npz)
         self.meta = meta
-        self.arms: list[str] = meta["arms"]
-        self.arm_spec: dict = meta["arm_spec"]
+        arms: list[str] = meta["arms"]
+        arm_spec: dict = meta["arm_spec"]
+        resolved: np.ndarray = arr["resolved"]  # (n_arms, n_tasks) bool
+        med_cost: np.ndarray = arr["med_cost"]  # (n_arms,)
+        fallback = int(meta["fallback_arm_index"])
+        if providers is not None:
+            keep = [i for i, a in enumerate(arms) if arm_spec[a]["provider"] in providers]
+            if not keep:
+                raise ValueError(f"no arms left after filtering to providers={providers}")
+            arms = [arms[i] for i in keep]
+            resolved = resolved[keep]
+            med_cost = med_cost[keep]
+            fallback = int(np.argmax(resolved.mean(axis=1)))
+        self.arms = arms
+        self.arm_spec = arm_spec
         self.k: int = meta["k"]
         self.tau: float = meta["tau"]
         self.sim_floor: float = meta["sim_floor"]
         self.emb: np.ndarray = arr["emb"]            # (n_tasks, dim) L2-normalised
-        self.resolved: np.ndarray = arr["resolved"]  # (n_arms, n_tasks) bool
-        self.med_cost: np.ndarray = arr["med_cost"]  # (n_arms,)
-        self.fallback: int = int(meta["fallback_arm_index"])
+        self.resolved = resolved
+        self.med_cost = med_cost
+        self.fallback = fallback
         self._order = np.argsort(self.med_cost)      # cheapest arm first
 
     # ---------------------------------------------------------------- internals
