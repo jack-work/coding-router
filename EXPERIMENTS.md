@@ -181,6 +181,34 @@ escalate) vs escalate-opus (always escalate) — the last two bracket the value 
 DECIDING. Pre-registered success: per-turn beats turn0-frozen on paired graded or
 cost at matched other-axis; both must beat continue-weak to show escalation matters.
 
+**Result (21 eval tasks, all with the same 4 forced haiku@budget turns):**
+| variant | graded | $/task |
+|---|---|---|
+| trained, turn0-frozen (one decision post-prefix) | 0.949 | $0.038 |
+| trained, per-turn | 0.956 | $0.046 |
+| static nano@high post-prefix | 0.988 | $0.052 |
+| always-escalate to opus | 0.968 | $0.236 |
+| never escalate (continue weak) | 0.920 | $0.149 |
+| ladder | 0.994 | $0.088 |
+
+Accidental but valuable: `static-opus` and `escalate-opus` were the IDENTICAL policy
+run twice live — they differ by 0.027 graded and 1.7x cost. That is the measured
+noise floor for single live samples at n=21; differences under ~0.03 are not real.
+
+**Verdicts against pre-registered criteria.**
+1. Escalation PAYS: never-escalate is dominated by everything (worst quality AND
+   among the most expensive — a weak model burning turns is not cheap).
+2. DECIDING pays: trained policies hit ~0.95 at $0.04-0.05/task — 5-6x cheaper than
+   always-escalate at within-noise quality.
+3. PER-TURN GRANULARITY STILL DOES NOT: per-turn vs turn0-frozen is +0.007 graded for
+   +20% cost — inside the measured noise floor. Two experiments (EXP-010, EXP-011)
+   now agree: on LCB the value is one good (re)decision, not continuous re-decision.
+
+**Lane disposition.** Per-turn granularity on LCB: answered (no measurable value,
+even with injected difficulty). The remaining per-turn question requires a live
+long-horizon domain (DeepSWE Docker harness — a separate build decision). The trained
+turn0 policy remains the deployable form of the live-lane router.
+
 ## EXP-004 — 8B encoder under the trained decision rule (2026-07-31)
 
 **Motivation.** EXP-001 showed 8B embeddings buy quality (kNN -0.007). Does the
