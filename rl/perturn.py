@@ -42,6 +42,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "results" / "rl" / "perturn"
 EP_DIR = OUT / "episodes"
 
+# Handicapped episodes (EXP-011) burn 4 weak turns before recovering; the default
+# 600s sandbox end-of-life killed one mid-grade and took the whole run down.
+sandbox.SANDBOX_TIMEOUT_S = 1800
+
 ARMS = [Arm("anthropic", "claude-haiku-4-5", None, "budget"),
         Arm("anthropic", "claude-opus-4-8", "medium", "adaptive"),
         Arm("openai", "gpt-5.3-codex", "high"),
@@ -362,7 +366,11 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
                               False, f"{pref}it{it}r{r}", handicap): (p, r)
                     for p, r in jobs}
             for f in cf.as_completed(futs):
-                rec = f.result()
+                try:
+                    rec = f.result()
+                except Exception as e:  # noqa: BLE001 — infra fault = missing data, not 0
+                    print(f"  it{it} EPISODE DROPPED (harness): {str(e)[:150]}", flush=True)
+                    continue
                 recs.append(rec)
                 print(f"  it{it} {rec['qid']:14s} graded={rec['graded']:.2f} "
                       f"${rec['cost_usd']:.4f} turns={rec['n_turns']} R={rec['reward']:+.3f}",
@@ -446,7 +454,13 @@ def cmd_eval(policy_path: str, workers: int = 10, handicap_k: int = 0) -> None:
                                   sticky=sticky and name in ("perturn", "turn0-frozen")),
                               mk(), np.random.default_rng(0), True, tag, handicap)
                     for p in evalp]
-            recs = [f.result() for f in cf.as_completed(futs)]
+            recs = []
+            for f in cf.as_completed(futs):
+                try:
+                    recs.append(f.result())
+                except Exception as e:  # noqa: BLE001 — report dropped, never zeroed
+                    print(f"  {name}: EPISODE DROPPED (harness): {str(e)[:150]}",
+                          flush=True)
         rows[name] = recs
         g = np.mean([r["graded"] for r in recs])
         c = np.sum([r["cost_usd"] for r in recs])

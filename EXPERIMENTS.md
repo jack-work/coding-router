@@ -141,6 +141,31 @@ Offline per-task program CONVERGED: ~3.9x parity / 5.3x -0.027 / 7-8x -0.03..-0.
 
 ---
 
+## EXP-012 — canonical re-run: quality-first, one eval, generalization axis (RUNNING)
+
+**Directive (Kion, 2026-07-31).** Quality bound under 1 graded point even at only 2x
+savings; the router must run locally on a user's machine; EXACTLY ONE eval setting =
+DeepSWE holdout; vary the TRAINING dataset to measure generalization to DeepSWE;
+measure tokens/task and speed/task. Roster: always-best, oracle, static luna_max,
+kNN, soft-kNN temps, GRPO-LoRA (most promising), REINFORCE-LoRA, each +/- KL anchor.
+
+**Changes from prior protocol.** Feasibility margin -0.02 -> -0.01; lam grid extended
+to 0.001; fallback selection = max inner graded (quality-first). Token (input+output,
+cache separate) and agent-duration matrices built from trials.json (100% filled) —
+every routed decision now reports tokens/task and seconds/task. Statistical honesty:
+at n=110 the <1% bound is a POINT-ESTIMATE criterion with CI containing 0; certifying
+<1% at 95% needs ~5-10x more eval data.
+
+**Tiebreak input (seeds 12-17).** grpo 5.84x/-0.036 vs rank 6.52x/-0.068 — GRPO's
+quality is stable (~-0.034 across three batches), rank's is worse and drifting; rank
+DROPPED from roster per directive.
+
+**Sweep.** v5: {frozen, reward, grpo} x {dswe, lcb, srb} x beta {0, 0.2} (frozen:
+beta 0 only) = 15 configs x seeds 0-5 on both GPUs (~7h). SRB trains quality-only
+(no cost field); LCB cost term rescaled (lam_train=3.0). Eval side always identical:
+DeepSWE-train memory, DeepSWE costs, inner-split selection. Winners get fresh-seed
+confirmation on 6-11 before the final table.
+
 ## EXP-011 — per-turn routing under injected difficulty (RUNNING, 2026-07-31)
 
 **Motivation.** EXP-010 found no per-turn advantage on LCB because easy episodes offer
