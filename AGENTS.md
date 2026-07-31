@@ -11,7 +11,7 @@ All source lives flat in `router/`, one package, seven files:
 | `router_core.py` | pricing table, `Router`/`Decision` (inference), `Matrix`/policies (CV, races) |
 | `harness.py` | unified OpenAI+Anthropic agent client, E2B sandbox exec, LiveCodeBench eval |
 | `export.py` | freezes the router into `results/router_v0.{json,npz}`, self-tests the artifact |
-| `datasets_b.py` | SWE-rebench + DeepSWE dataset loaders |
+| `datasets.py` | SWE-rebench + DeepSWE dataset loaders |
 | `benchmarks.py` | CLI: fetch-swebench-matrix, transfer-swebench, run-lcb, smoke-agent |
 | `experiments.py` | CLI: holdout-deepswe, exp1-holdout9, race-router, race-deepswe, probe-arms |
 | `analysis.py` | CLI: analyze-phase1, headroom, price-traces, extract-traces |
@@ -27,7 +27,7 @@ All source lives flat in `router/`, one package, seven files:
   it's closest to in kind. If nothing above fits and you're certain a new file is warranted, say so
   explicitly and explain why consolidation doesn't work, rather than defaulting to a new file.
 - If consolidating would push a file over 1000 lines, that's a signal to split by genuine topic
-  (as `datasets_a.py`/`datasets_b.py` once were) — not to abandon the limit.
+  (dataset loaders were briefly two files for exactly this reason) — not to abandon the limit.
 
 ## Tooling
 

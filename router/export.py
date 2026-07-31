@@ -69,7 +69,7 @@ def cmd_export_router(args) -> None:
     OUT = ROOT / "results"
 
     full = experiments.build()
-    d = experiments.datasets_b.load_deepswe()
+    d = experiments.datasets.load_deepswe()
     experiments.embed(full, d["text"])
     keep = [i for i, a in enumerate(full.arms)
             if any(t in a for t in ("gpt_5", "claude_", "codex"))]

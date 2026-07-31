@@ -22,7 +22,7 @@ import numpy as np
 import openai
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from router import datasets_b  # noqa: E402
+from router import datasets  # noqa: E402
 from router import harness as sandbox  # noqa: E402
 from router import router_core as route  # noqa: E402
 from router.harness import load_env  # noqa: E402
@@ -46,7 +46,7 @@ DEEPSWE_EMB = ROOT / "results" / "deepswe_embeddings.json"
 
 
 def build() -> route.Matrix:
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     g = np.array(d["score"], dtype=float)
     c = np.array(d["cost"], dtype=float)
     # 2 score cells and 7 cost cells are missing. Silently propagating them made argmin
@@ -107,7 +107,7 @@ def deepswe_run(m: route.Matrix, policy, folds, pricey: int):
 def cmd_race_deepswe(args: argparse.Namespace) -> None:
     load_env()
     m = build()
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     embed(m, d["text"])
     print(f"DeepSWE: {len(m.arms)} arms x {m.n} tasks, {len(set(m.group))} repos (CV groups)")
 
@@ -218,7 +218,7 @@ def split_by_repo_holdout(m: route.Matrix, frac: float, seed: int) -> tuple[np.n
 def cmd_holdout_deepswe(args: argparse.Namespace) -> None:
     load_env()
     full = build()
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     embed(full, d["text"])
     keep = [i for i, a in enumerate(full.arms)
             if any(t in a for t in ("gpt_5", "claude_", "codex"))]
@@ -339,7 +339,7 @@ def one_task(TR, q_res, q_grd, q_cost, q_diff, q_grp, q_emb, k, tau):
 def cmd_exp1_holdout9(args: argparse.Namespace) -> None:
     load_env()
     full = build()
-    d = datasets_b.load_deepswe()
+    d = datasets.load_deepswe()
     embed(full, d["text"])
     idx = [i for i, a in enumerate(full.arms)
            if a.replace("mini_swe_agent_", "") in NINE]

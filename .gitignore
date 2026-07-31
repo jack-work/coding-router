@@ -1,7 +1,7 @@
 .env.local
 .venv/
-data/
-results/episodes/
+data
+results/episodes
 results/contaminated_capbug/
 results/local_prefix/
 results/deepswe_acts_*.npz

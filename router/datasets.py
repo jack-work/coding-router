@@ -11,7 +11,7 @@ WHY this file is shaped the way it is:
 The three nebius task datasets (V2 / v1 / leaderboard) contain ZERO model outcomes. Every
 column in all three is a task-definition field, so on their own they cannot supervise a
 router at all -- they are a *sweep plan*, not a matrix. That is verified here, not assumed:
-`python router/datasets_b.py swe-rebench` prints the column list it actually read.
+`python router/datasets.py swe-rebench` prints the column list it actually read.
 
 But outcomes for these instance ids do exist in two adjacent nebius dumps, and they are
 free, per-task, and -- because both dumps ship MANY rollouts per instance -- GRADED, not
