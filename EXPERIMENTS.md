@@ -180,6 +180,37 @@ beta 0 only) = 15 configs x seeds 0-5 on both GPUs (~7h). SRB trains quality-onl
 DeepSWE-train memory, DeepSWE costs, inner-split selection. Winners get fresh-seed
 confirmation on 6-11 before the final table.
 
+## EXP-014 — live DeepSWE via Pier/Modal: harness validation + drift (2026-07-31)
+
+**Budget:** Kion approved Modal <$10k, APIs $20k. Spend ledger (cumulative, live lanes):
+LCB live episodes ~$62; DeepSWE smokes ~$0.4; Modal compute ~$1.
+
+**Harness.** DeepSWE tasks are Harbor-format; Datacurve's official runner Pier
+(datacurve-pier 0.3.0, PyPI) reproduces the leaderboard setup exactly: mini-swe-agent,
+Modal environments (CPU-only: tasks declare cpus=2, mem=8GB, gpus=0), separate
+verifier env, reward.json with the same f2p fields as trials.json, per-trial
+cost_usd/tokens/steps. Arm mapping: --model <litellm id with DOTS, e.g.
+openai/gpt-5.6-luna> --ak reasoning_effort=<effort>. (Trials' internal names use
+dashes; gpt-5-6-luna 404s on the live API.) Matrix opus arms ran via vertex_ai; we
+call Anthropic directly — minor provenance delta.
+
+**Zero-step trap (batch-runner rule).** A bad model id -> agent runs 0 steps -> empty
+patch -> verifier scores the unmodified repo (partial ~0.13, p2p green) — looks like a
+plausible bad score. Any trial with n_agent_steps==0 is MISSING DATA: halt and alert,
+never record.
+
+**Replication probe (luna_max x abs-module-cache-flags).** Live: f2p 0.95 (19/20),
+$0.017, 262k tokens, 16 steps. Matrix (2026-06-30): 1.000, $1.57, 7.6M tokens, ~100
+steps. Quality replicates; cost/tokens show ~30-90x efficiency drift — either the
+model got drastically more efficient since matrix collection, or reasoning_effort=max
+is being silently dropped (6k output tokens over 16 steps looks reasoning-free).
+low-vs-max A/B on the same task running to separate the two.
+
+**Consequence either way: matrix cost/token structure is stale for LIVE routing.**
+Relative arm ordering may survive; absolutes do not. The live confirmation batch must
+therefore re-benchmark the router's candidate arms live (budgeted), and live rewards
+always use live costs.
+
 ## EXP-011 — per-turn routing under injected difficulty (RUNNING, 2026-07-31)
 
 **Motivation.** EXP-010 found no per-turn advantage on LCB because easy episodes offer
