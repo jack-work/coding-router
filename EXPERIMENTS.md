@@ -117,6 +117,22 @@ claim; report cost otherwise).
 frozen-temps 3.75x/+0.009 -> nca 4.55x/-0.019 -> factor champion 5.33x/-0.027
 (fresh-confirmed) -> anchored-lora-b0.2 5.82x/-0.030 -> rank-lora 6.63x/-0.051.
 
+**Fresh-seed confirmations (seeds 6-11).**
+- rank: 8.36x, delta -0.052 (CI [-0.086, -0.019]) — CONFIRMED, even stronger ratio;
+  quality cost stable at ~5pp. The program's max-savings point.
+- nca: 5.01x, delta -0.036 (CI [-0.073, -0.003]) — parity claim DEMOTED (CI excludes
+  0 on fresh seeds); lands between champion and anchored-LoRA.
+
+**Selection-bias tax, quantified.** Every quality-selected variant degrades ~0.02
+graded from selection seeds to fresh seeds (champion -0.003 -> -0.027; nca -0.019 ->
+-0.036), while rank — selected for ratio, not quality — held (-0.051 -> -0.052).
+Read all seeds-0-5 deltas with a ~-0.02 correction. Frozen-temps' +0.009 parity floor
+rests on seeds 0-5 only; fresh confirmation launched (with grpo, completing the
+sweep's fresh picture), plus rank+beta-0.2 (does anchoring buy back rank's quality?).
+
+**Honest frontier on FRESH evidence:** factor champion 5.33x/-0.027 (balanced pick),
+nca 5.01x/-0.036, rank-LoRA 8.36x/-0.052 (aggressive pick).
+
 ## EXP-004 — 8B encoder under the trained decision rule (2026-07-31)
 
 **Motivation.** EXP-001 showed 8B embeddings buy quality (kNN -0.007). Does the
