@@ -14,7 +14,6 @@ Reads /nvme/work/router-rl/{router_rl_payload.npz,router_rl_meta.json,texts.json
 Writes <outdir>/result_s{seed}_{mode}_lam{lam}.json atomically + metrics.jsonl.
 """
 import json
-import os
 import pathlib
 import sys
 import time

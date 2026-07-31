@@ -43,7 +43,8 @@ for mode in ("frozen", "lora"):
         print(f"  {arms[a][15:]:38s} {len(js)/n*100:9.1f}% {c/len(js):8.2f} {c:8.1f} "
               f"{c/total*100:7.1f}% {np.mean([graded[a,j] for j in js]):7.3f}")
     print(f"  {'total':38s} {'100%':>10s} {total/n:8.2f} {total:8.1f} {'100%':>8s} {g:7.3f}")
-    print(f"  Baseline ${b_tot/n:.2f}/task, ${b_tot:.1f} total, graded {bg:.3f} -> ratio {b_tot/total:.2f}x, delta {g-bg:+.3f}")
+    print(f"  Baseline ${b_tot/n:.2f}/task, ${b_tot:.1f} total, graded {bg:.3f} "
+          f"-> ratio {b_tot/total:.2f}x, delta {g-bg:+.3f}")
     print(f"  per-seed ratio median {np.median(ratios):.2f} (min {min(ratios):.2f} max {max(ratios):.2f})")
     print(f"  chosen (lam, step) per seed: {list(zip(lams, steps))}")
 

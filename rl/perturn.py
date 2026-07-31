@@ -140,25 +140,36 @@ def one_turn(arm: Arm, task: str, history: list[dict]) -> tuple[str, list[str], 
 # --------------------------------------------------------------------------- features
 @dataclasses.dataclass
 class Feats:
-    """State featurizer. Task priors come from TRAIN contests only (no eval leakage)."""
+    """State featurizer. Task priors come from TRAIN contests only (no eval leakage).
+
+    sticky=True appends a one-hot of the PREVIOUS turn's arm, letting the policy learn
+    switch economics (a switch pays the candidate arm's cold prefill; staying can reuse
+    provider cache) — the divergence-cost point from the exp/per-turn-routing lane.
+    """
 
     prior: np.ndarray            # (n_arms,) kNN p_solve for this task
-    n_arms: int = len(ARMS)
+    sticky: bool = False
 
     def vec(self, turn: int, cost_so_far: float, passed_frac: float,
-            wrote: bool, last_ok: bool) -> np.ndarray:
-        return np.concatenate([
+            wrote: bool, last_ok: bool, prev_arm: int = -1) -> np.ndarray:
+        base = np.concatenate([
             self.prior,
             [turn / MAX_TURNS, np.log10(cost_so_far + 1e-4) / 4.0 + 1.0,
              passed_frac, float(wrote), float(last_ok), 1.0]])
+        if not self.sticky:
+            return base
+        onehot = np.zeros(len(ARMS))
+        if prev_arm >= 0:
+            onehot[prev_arm] = 1.0
+        return np.concatenate([base, onehot])
 
 
 DIM = len(ARMS) + 6
 
 
 class Policy:
-    def __init__(self, W: np.ndarray | None = None):
-        self.W = W if W is not None else np.zeros((len(ARMS), DIM))
+    def __init__(self, W: np.ndarray | None = None, dim: int = DIM):
+        self.W = W if W is not None else np.zeros((len(ARMS), dim))
 
     def logits(self, x: np.ndarray) -> np.ndarray:
         return self.W @ x
@@ -179,6 +190,47 @@ class Policy:
         return cls(np.array(d["W"]))
 
 
+class Turn0Policy:
+    """Per-task control: the wrapped policy's turn-0 argmax, frozen for the episode."""
+
+    def __init__(self, inner: Policy):
+        self.inner, self.choice = inner, None
+
+    def logits(self, x: np.ndarray) -> np.ndarray:
+        if self.choice is None:
+            self.choice = int(np.argmax(self.inner.logits(x[:DIM])))
+        z = np.full(len(ARMS), -1e3)
+        z[self.choice] = 1e3
+        return z
+
+
+class StaticPolicy:
+    def __init__(self, arm_idx: int):
+        self.arm_idx = arm_idx
+
+    def logits(self, x: np.ndarray) -> np.ndarray:
+        z = np.full(len(ARMS), -1e3)
+        z[self.arm_idx] = 1e3
+        return z
+
+
+LADDER_ORDER = [5, 4, 3, 6, 2, 1, 0]  # ARMS indices sorted by LCB median cost, ascending
+
+
+class LadderPolicy:
+    """Hand-built per-turn cascade: start cheap, escalate while public tests fail."""
+
+    def logits(self, x: np.ndarray) -> np.ndarray:
+        turn = x[len(ARMS)] * MAX_TURNS
+        passed = x[len(ARMS) + 2]
+        rung = 0 if turn < 4 else (2 if turn < 8 else (4 if turn < 12 else 6))
+        if passed >= 1.0:
+            rung = min(rung, 2)
+        z = np.full(len(ARMS), -1e3)
+        z[LADDER_ORDER[rung]] = 1e3
+        return z
+
+
 # --------------------------------------------------------------------------- episode
 def run_episode(prob, feats: Feats, policy: Policy, rng: np.random.Generator,
                 greedy: bool, tag: str) -> dict:
@@ -192,17 +244,18 @@ def run_episode(prob, feats: Feats, policy: Policy, rng: np.random.Generator,
     t0 = time.time()
     history: list[dict] = []
     turns, cost = [], 0.0
-    passed_frac, wrote, last_ok = 0.0, False, True
+    passed_frac, wrote, last_ok, prev_arm = 0.0, False, True, -1
     task = sandbox.task_prompt(prob)
     with sandbox.SandboxSession({"lane": "coding-router-perturn", "qid": prob.qid}) as s:
         s.write("public_tests.json", json.dumps(prob.public_tests))
         s.write("check.py", sandbox.CHECKER)
         for turn in range(MAX_TURNS):
-            x = feats.vec(turn, cost, passed_frac, wrote, last_ok)
+            x = feats.vec(turn, cost, passed_frac, wrote, last_ok, prev_arm)
             if greedy:
                 a, p = int(np.argmax(policy.logits(x))), None
             else:
                 a, p = policy.sample(x, rng)
+            prev_arm = a
             try:
                 text, cmds, c, stop = one_turn(ARMS[a], task, history)
             except Exception as e:  # noqa: BLE001 — arm/API failure ends the episode
@@ -276,18 +329,21 @@ def make_feats(qid: str, train_qids: set[str]) -> Feats:
 
 # --------------------------------------------------------------------------- train / eval
 def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
-              workers: int = 10, lr: float = 0.05) -> None:
+              workers: int = 10, lr: float = 0.05, sticky: bool = False) -> None:
     load_env()
     sandbox.semaphore(workers)
     train, evalp = contest_split()
     train_qids = {p.qid for p in train}
-    print(f"{len(train)} train tasks / {len(evalp)} eval tasks; arms: {ARM_IDS}")
-    feats = {p.qid: make_feats(p.qid, train_qids) for p in train + evalp}
-    policy = Policy()
+    print(f"{len(train)} train tasks / {len(evalp)} eval tasks; arms: {ARM_IDS}; "
+          f"sticky={sticky}")
+    feats = {p.qid: dataclasses.replace(make_feats(p.qid, train_qids), sticky=sticky)
+             for p in train + evalp}
+    policy = Policy(dim=DIM + len(ARMS) if sticky else DIM)
     OUT.mkdir(parents=True, exist_ok=True)
     mlog = (OUT / "metrics.jsonl").open("a")
     rng0 = np.random.default_rng(SEED)
 
+    pref = "st-" if sticky else ""
     for it in range(iters):
         batch = list(rng0.choice(len(train), min(tasks_per_iter, len(train)), replace=False))
         jobs = [(train[i], r) for i in batch for r in range(rollouts)]
@@ -295,7 +351,7 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(run_episode, p, feats[p.qid], policy,
                               np.random.default_rng(hash((it, p.qid, r)) % 2**32),
-                              False, f"it{it}r{r}"): (p, r) for p, r in jobs}
+                              False, f"{pref}it{it}r{r}"): (p, r) for p, r in jobs}
             for f in cf.as_completed(futs):
                 rec = f.result()
                 recs.append(rec)
@@ -335,7 +391,7 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
                              for a in range(len(ARMS))}}
         mlog.write(json.dumps(stats) + "\n")
         mlog.flush()
-        policy.save(OUT / f"policy_it{it}.json")
+        policy.save(OUT / f"policy_{pref}it{it}.json")
         print(f"== it{it}: graded {stats['graded']:.3f}, ${stats['cost']:.2f}, "
               f"mean R {stats['reward']:+.3f}, total spend ${stats['spend_total']:.2f}",
               flush=True)
@@ -344,26 +400,37 @@ def cmd_train(iters: int = 5, tasks_per_iter: int = 20, rollouts: int = 2,
 
 
 def cmd_eval(policy_path: str, workers: int = 10) -> None:
+    """EXP-010 comparison: trained per-turn policy vs current bests, all LIVE episodes
+    on the held-out contests: turn0-frozen (per-task control), hand ladder cascade,
+    and the two strongest static arms from the offline matrix."""
     load_env()
     sandbox.semaphore(workers)
     train, evalp = contest_split()
     train_qids = {p.qid for p in train}
     feats = {p.qid: make_feats(p.qid, train_qids) for p in evalp}
     policy = Policy.load(pathlib.Path(policy_path))
-    variants = {"perturn": policy}
+    sticky = policy.W.shape[1] > DIM
+    factories = {
+        "perturn": lambda: policy,
+        "turn0-frozen": lambda: Turn0Policy(policy),
+        "ladder": lambda: LadderPolicy(),
+        "static-nano@high": lambda: StaticPolicy(ARM_IDS.index("gpt-5.4-nano@high")),
+        "static-opus@medium": lambda: StaticPolicy(ARM_IDS.index("claude-opus-4-8@medium")),
+    }
     rows = {}
-    for name, pol in variants.items():
-        recs = []
+    for name, mk in factories.items():
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(run_episode, p, feats[p.qid], pol,
-                              np.random.default_rng(0), True, f"eval-{name}")
+            futs = [ex.submit(run_episode, p,
+                              dataclasses.replace(feats[p.qid],
+                                                  sticky=sticky and name == "perturn"),
+                              mk(), np.random.default_rng(0), True, f"eval-{name}")
                     for p in evalp]
             recs = [f.result() for f in cf.as_completed(futs)]
         rows[name] = recs
         g = np.mean([r["graded"] for r in recs])
         c = np.sum([r["cost_usd"] for r in recs])
-        print(f"{name}: graded {g:.3f}, ${c:.3f} total, "
-              f"${c/len(recs):.4f}/task over {len(recs)} eval tasks")
+        print(f"{name:20s}: graded {g:.3f}, ${c:.3f} total, "
+              f"${c/len(recs):.4f}/task over {len(recs)} eval tasks", flush=True)
     (OUT / "eval.json").write_text(json.dumps(
         {k: [{kk: r[kk] for kk in ("qid", "graded", "cost_usd", "n_turns")}
              for r in v] for k, v in rows.items()}))
@@ -387,7 +454,7 @@ if __name__ == "__main__":
     if cmd == "smoke":
         cmd_smoke()
     elif cmd == "train":
-        cmd_train()
+        cmd_train(sticky="--sticky" in sys.argv)
     elif cmd == "eval":
         cmd_eval(sys.argv[2])
     else:
