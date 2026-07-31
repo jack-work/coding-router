@@ -83,7 +83,39 @@ Success = holdout quality decay eliminated AND a point dominating either EXP-002
 **Result (beta=0.05, 6 seeds).** 5.84x, graded 0.882 (delta -0.052, CI
 [-0.087, -0.021]) — statistically indistinguishable from UNANCHORED LoRA
 (5.72x/-0.049): the weak anchor changed nothing. All seeds again selected lam=0.1.
-beta=0.2 batch: seeds 3-5 still running (GPU0 now shared with EXP-009).
+
+**Result (beta=0.2, 6 seeds).** 5.82x, delta -0.030 (CI [-0.061, -0.002]), selected
+checkpoints late (150-270): the STRONG anchor tamed the overfit decay and recovered
+~2pp of quality at the same ratio tier. Directionally the offline-RL anchoring story
+holds; it took beta=0.2, not 0.05.
+
+**Verdict.** Anchored LoRA at beta=0.2 (5.82x/-0.030) sits on the frontier next to
+the factor champion (5.33x/-0.027) — at ~100x the training compute. Anchoring works;
+it is not worth the GPUs at n=110.
+
+---
+
+## EXP-009 — encoder training-algorithm sweep results (2026-07-31)
+
+Seeds 0-5, LoRA 0.6B, beta=0, 150 steps, identical protocol; reward control replicates
+unanchored LoRA (sanity holds):
+
+| algo | ratio | graded delta (CI) | note |
+|---|---|---|---|
+| rank (pairwise utility) | 6.63x | -0.051 [-0.089, -0.017] | highest ratio in program |
+| reward (control) | 5.77x | -0.047 [-0.080, -0.017] | replicates EXP-002 lora |
+| grpo (sampled) | 5.60x | -0.037 [-0.065, -0.011] | noise-as-regularizer: mild, directional |
+| nca (metric only) | 4.55x | -0.019 [-0.043, +0.004] | best encoder-trained quality; no reward signal |
+
+**Reading.** The training signal matters more than the estimator: ranking pushes the
+cost axis; pure representation learning (NCA) protects quality. GRPO ~ exact gradients
+(overlapping CIs). Fresh-seed confirmations (seeds 6-11) for rank and nca launched,
+pre-registered: same acceptance rule as EXP-007 (delta CI contains 0 for a parity
+claim; report cost otherwise).
+
+**Current per-task Pareto set (DeepSWE, pooled 6-seed unless noted):**
+frozen-temps 3.75x/+0.009 -> nca 4.55x/-0.019 -> factor champion 5.33x/-0.027
+(fresh-confirmed) -> anchored-lora-b0.2 5.82x/-0.030 -> rank-lora 6.63x/-0.051.
 
 ## EXP-004 — 8B encoder under the trained decision rule (2026-07-31)
 
