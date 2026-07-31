@@ -1,0 +1,647 @@
+{
+ "anthropic:claude-haiku-4-5:None:off": {
+  "ok": true,
+  "latency_s": 1.45,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 595,
+  "out_tok": 72,
+  "cache_read": 0
+ },
+ "anthropic:claude-haiku-4-5:None:budget": {
+  "ok": true,
+  "latency_s": 1.85,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "thinking",
+   "tool_use"
+  ],
+  "in_tok": 625,
+  "out_tok": 152,
+  "cache_read": 0
+ },
+ "anthropic:claude-haiku-4-5:high:off": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This model does not support the effort parameter.'}, 'request_id': 'req_011CdVrNhvwjUt4kTbffMQZe'}"
+ },
+ "anthropic:claude-sonnet-5:low:adaptive": {
+  "ok": true,
+  "latency_s": 2.54,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 481,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-sonnet-5:medium:adaptive": {
+  "ok": true,
+  "latency_s": 1.59,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 481,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-sonnet-5:high:adaptive": {
+  "ok": true,
+  "latency_s": 2.91,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 481,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-sonnet-5:xhigh:adaptive": {
+  "ok": true,
+  "latency_s": 3.54,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 481,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-sonnet-5:max:adaptive": {
+  "ok": true,
+  "latency_s": 5.34,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 481,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-opus-4-8:low:adaptive": {
+  "ok": true,
+  "latency_s": 1.75,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "text",
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 67,
+  "cache_read": 0
+ },
+ "anthropic:claude-opus-4-8:medium:adaptive": {
+  "ok": true,
+  "latency_s": 4.47,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "text",
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 67,
+  "cache_read": 0
+ },
+ "anthropic:claude-opus-4-8:high:adaptive": {
+  "ok": true,
+  "latency_s": 2.37,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "text",
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 70,
+  "cache_read": 0
+ },
+ "anthropic:claude-opus-4-8:xhigh:adaptive": {
+  "ok": true,
+  "latency_s": 3.54,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "thinking",
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 76,
+  "cache_read": 0
+ },
+ "anthropic:claude-opus-4-8:max:adaptive": {
+  "ok": true,
+  "latency_s": 2.7,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "thinking",
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 98,
+  "cache_read": 0
+ },
+ "anthropic:claude-fable-5:low:omit": {
+  "ok": true,
+  "latency_s": 3.8,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-fable-5:medium:omit": {
+  "ok": true,
+  "latency_s": 6.47,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-fable-5:high:omit": {
+  "ok": true,
+  "latency_s": 4.23,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "anthropic:claude-fable-5:xhigh:omit": {
+  "ok": true,
+  "latency_s": 3.92,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 60,
+  "cache_read": 0
+ },
+ "anthropic:claude-fable-5:max:omit": {
+  "ok": true,
+  "latency_s": 4.07,
+  "stop_reason": "tool_use",
+  "tool_called": true,
+  "block_types": [
+   "tool_use"
+  ],
+  "in_tok": 417,
+  "out_tok": 52,
+  "cache_read": 0
+ },
+ "openai:gpt-5.4-nano:none": {
+  "ok": true,
+  "latency_s": 2.62,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 30,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4-nano:minimal": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'error': {'message': \"Unsupported value: 'minimal' is not supported with the 'gpt-5.4-nano' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'unsupported_value'}}"
+ },
+ "openai:gpt-5.4-nano:low": {
+  "ok": true,
+  "latency_s": 2.48,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 30,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4-nano:medium": {
+  "ok": true,
+  "latency_s": 1.55,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 30,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4-nano:high": {
+  "ok": true,
+  "latency_s": 1.56,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 30,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4-nano:xhigh": {
+  "ok": true,
+  "latency_s": 1.47,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 80,
+  "reasoning_tok": 48
+ },
+ "openai:gpt-5.4-mini:none": {
+  "ok": true,
+  "latency_s": 0.93,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 41,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4-mini:minimal": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'error': {'message': \"Unsupported value: 'minimal' is not supported with the 'gpt-5.4-mini' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'unsupported_value'}}"
+ },
+ "openai:gpt-5.4-mini:low": {
+  "ok": true,
+  "latency_s": 1.23,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 54,
+  "reasoning_tok": 11
+ },
+ "openai:gpt-5.4-mini:medium": {
+  "ok": true,
+  "latency_s": 1.1,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 84,
+  "reasoning_tok": 41
+ },
+ "openai:gpt-5.4-mini:high": {
+  "ok": true,
+  "latency_s": 2.55,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 150,
+  "reasoning_tok": 107
+ },
+ "openai:gpt-5.4-mini:xhigh": {
+  "ok": true,
+  "latency_s": 2.46,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 280,
+  "reasoning_tok": 236
+ },
+ "openai:gpt-5.4:none": {
+  "ok": true,
+  "latency_s": 1.41,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4:minimal": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'error': {'message': \"Unsupported value: 'minimal' is not supported with the 'gpt-5.4' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'unsupported_value'}}"
+ },
+ "openai:gpt-5.4:low": {
+  "ok": true,
+  "latency_s": 3.3,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4:medium": {
+  "ok": true,
+  "latency_s": 1.69,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4:high": {
+  "ok": true,
+  "latency_s": 1.05,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.4:xhigh": {
+  "ok": true,
+  "latency_s": 1.66,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 176,
+  "reasoning_tok": 133
+ },
+ "openai:gpt-5.5:none": {
+  "ok": true,
+  "latency_s": 1.46,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 39,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.5:minimal": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'error': {'message': \"Unsupported value: 'minimal' is not supported with the 'gpt-5.5' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'unsupported_value'}}"
+ },
+ "openai:gpt-5.5:low": {
+  "ok": true,
+  "latency_s": 1.21,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.5:medium": {
+  "ok": true,
+  "latency_s": 1.72,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 36,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.5:high": {
+  "ok": true,
+  "latency_s": 1.47,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 36,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.5:xhigh": {
+  "ok": true,
+  "latency_s": 1.37,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.3-codex:none": {
+  "ok": true,
+  "latency_s": 1.07,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.3-codex:minimal": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'error': {'message': \"Unsupported value: 'minimal' is not supported with the 'gpt-5.3-codex' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'unsupported_value'}}"
+ },
+ "openai:gpt-5.3-codex:low": {
+  "ok": true,
+  "latency_s": 1.8,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 53,
+  "reasoning_tok": 16
+ },
+ "openai:gpt-5.3-codex:medium": {
+  "ok": true,
+  "latency_s": 1.76,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 68,
+  "reasoning_tok": 31
+ },
+ "openai:gpt-5.3-codex:high": {
+  "ok": true,
+  "latency_s": 1.94,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 120,
+  "reasoning_tok": 83
+ },
+ "openai:gpt-5.3-codex:xhigh": {
+  "ok": true,
+  "latency_s": 3.75,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call",
+   "reasoning"
+  ],
+  "in_tok": 79,
+  "out_tok": 260,
+  "reasoning_tok": 219
+ },
+ "openai:gpt-5.6-sol:none": {
+  "ok": true,
+  "latency_s": 1.65,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 42,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.6-sol:minimal": {
+  "ok": false,
+  "error_type": "BadRequestError",
+  "error": "Error code: 400 - {'error': {'message': \"Unsupported value: 'minimal' is not supported with the 'gpt-5.6-sol' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'unsupported_value'}}"
+ },
+ "openai:gpt-5.6-sol:low": {
+  "ok": true,
+  "latency_s": 2.13,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 42,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.6-sol:medium": {
+  "ok": true,
+  "latency_s": 1.67,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 42,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.6-sol:high": {
+  "ok": true,
+  "latency_s": 1.37,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.6-sol:xhigh": {
+  "ok": true,
+  "latency_s": 1.16,
+  "status": "completed",
+  "tool_called": true,
+  "block_types": [
+   "function_call"
+  ],
+  "in_tok": 79,
+  "out_tok": 35,
+  "reasoning_tok": 0
+ },
+ "openai:gpt-5.1-codex-mini:none": {
+  "ok": false,
+  "error_type": "NotFoundError",
+  "error": "Error code: 404 - {'error': {'message': 'Model not found gpt-5.1-codex-mini', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}"
+ },
+ "openai:gpt-5.1-codex-mini:minimal": {
+  "ok": false,
+  "error_type": "NotFoundError",
+  "error": "Error code: 404 - {'error': {'message': 'Model not found gpt-5.1-codex-mini', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}"
+ },
+ "openai:gpt-5.1-codex-mini:low": {
+  "ok": false,
+  "error_type": "NotFoundError",
+  "error": "Error code: 404 - {'error': {'message': 'Model not found gpt-5.1-codex-mini', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}"
+ },
+ "openai:gpt-5.1-codex-mini:medium": {
+  "ok": false,
+  "error_type": "NotFoundError",
+  "error": "Error code: 404 - {'error': {'message': 'Model not found gpt-5.1-codex-mini', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}"
+ },
+ "openai:gpt-5.1-codex-mini:high": {
+  "ok": false,
+  "error_type": "NotFoundError",
+  "error": "Error code: 404 - {'error': {'message': 'Model not found gpt-5.1-codex-mini', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}"
+ },
+ "openai:gpt-5.1-codex-mini:xhigh": {
+  "ok": false,
+  "error_type": "NotFoundError",
+  "error": "Error code: 404 - {'error': {'message': 'Model not found gpt-5.1-codex-mini', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}"
+ }
+}
