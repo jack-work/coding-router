@@ -61,10 +61,15 @@ STANDARD: dict[str, dict[str, Price]] = {
         "gpt-5.6-sol":   Price(5.00, 0.50, 30.00, 6.25),
     },
     "anthropic": {
-        "claude-haiku-4-5": Price(1.00, 0.10,  5.00, 1.25),
-        "claude-sonnet-5":  Price(3.00, 0.30, 15.00, 3.75),   # post-intro
-        "claude-opus-4-8":  Price(5.00, 0.50, 25.00, 6.25),
-        "claude-fable-5":   Price(10.00, 1.00, 50.00, 12.50),
+        # Anthropic rows re-verified against the live pricing page 2026-07-31, when
+        # sonnet-4-6 and opus-5 were added (opus-5 prices identically to opus-4-8;
+        # sonnet-4-6 identically to post-intro sonnet-5).
+        "claude-haiku-4-5":  Price(1.00, 0.10,  5.00, 1.25),
+        "claude-sonnet-4-6": Price(3.00, 0.30, 15.00, 3.75),
+        "claude-sonnet-5":   Price(3.00, 0.30, 15.00, 3.75),   # post-intro
+        "claude-opus-4-8":   Price(5.00, 0.50, 25.00, 6.25),
+        "claude-opus-5":     Price(5.00, 0.50, 25.00, 6.25),
+        "claude-fable-5":    Price(10.00, 1.00, 50.00, 12.50),
     },
 }
 
