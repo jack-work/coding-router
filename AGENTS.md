@@ -12,10 +12,19 @@ This repo is the PRODUCT: the deployable router and nothing else. Two code files
 | `serve.py` | `python -m router.serve` — one command, one OpenAI-compatible endpoint |
 
 The research half that built and validates this — dataset loaders, the measurement
-harness (`AgentRunner`/E2B/LiveCodeBench), CV policies, benchmarks, artifact export —
-lives in world-model-optimizer's `packages/router-lab`, which depends on this repo.
-New research/eval code goes THERE, never here. The shipped artifacts
-(`results/router_v0*.{json,npz}`) are build outputs produced by the lab's exporter.
+harness, CV policies, benchmarks, artifact export — lives in world-model-optimizer
+(`wmo optimize route` / `wmo research`). New research/eval code goes THERE, never here.
+
+Two invariants of the product itself:
+
+- **Routing runs fully locally.** Embeddings are computed in-process by a small local
+  model (Qwen3-Embedding-0.6B: MLX on Apple Silicon, sentence-transformers elsewhere)
+  and the kNN decision is pure numpy. API keys exist only to dispatch the chosen model
+  and summarize long trajectories — never to route.
+- **Exactly one default artifact, and it lives on Hugging Face, never in git.**
+  `serve` downloads `router.{json,npz}` from `experiential-labs/coding-router` on first
+  run (then runs offline); new router versions overwrite that repo in place. Users fit
+  their own artifacts from their own traces via wmo.
 
 ## Hard rules
 
@@ -93,8 +102,11 @@ built-in "max lines per file" rule, so the 1000-line rule is enforced by this ch
 find router -name "*.py" | xargs wc -l | awk '$1 > 1000 && $2 != "total" {print; exit 1}'
 ```
 
-**ty baseline: 26 known diagnostics (all in serve.py), not bugs, don't chase them to zero
-without asking first.** They trace to intentional dynamic-typing patterns a static checker
+**ty baseline: 27 known diagnostics (all in serve.py), not bugs, don't chase them to zero
+without asking first.** Two of them are `unresolved-import` on the platform-conditional
+embedding backends (`mlx.core`, `sentence_transformers`) — only one of the two packages is
+ever installed on a given platform, so a static checker on any single machine cannot
+resolve the other. They trace to intentional dynamic-typing patterns a static checker
 can't see through — chiefly `ChatMessage.content: str | None` participating in string
 concatenation in the Chat Completions translation functions (a real but pre-existing latent
 gap: the same crash risk existed invisibly behind untyped dict access before Pydantic typing

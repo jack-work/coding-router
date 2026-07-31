@@ -19,9 +19,11 @@ import queue
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import anthropic
 import numpy as np
@@ -30,11 +32,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from router.router_core import STANDARD, Decision, Router
+from router.router_core import ARTIFACT_JSON, ARTIFACT_NPZ, STANDARD, Decision, Router
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.local"
 DISPATCH_MAX_TOKENS = 32_000
+
+# The one default artifact lives on Hugging Face (heavy files never in git); new router
+# versions overwrite it in place. `serve` downloads it on first run, then runs offline.
+HF_ARTIFACT_REPO = "experiential-labs/coding-router"
 
 
 def load_env(path: pathlib.Path | None = None) -> None:
@@ -542,6 +548,108 @@ ANCHOR_BUDGET = 6_000
 MIDDLE_BUDGET = 8_000
 RECENT_MSGS = 8       # newest messages kept verbatim
 CHUNK_MSGS = 6        # ~3 tool round-trips per summarized chunk
+# ---------------------------------------------------------------- local routing infra
+# Routing never touches an API: the artifact is fetched once, and every embedding is
+# computed in-process by a small local model in the SAME vector space the artifact's
+# reference tasks were embedded in (kNN cosine across two embedding models' spaces is
+# meaningless). MLX runs the exact quantized model the shipped bank was built with.
+EMBED_MODEL_MLX = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+EMBED_MODEL_TORCH = "Qwen/Qwen3-Embedding-0.6B"
+
+_local_embed: Callable[[str], np.ndarray] | None = None
+
+
+def load_local_embedder() -> Callable[[str], np.ndarray]:
+    """Load the local Qwen3 embedding backend once and return the embed function.
+
+    Backend selection: MLX on Apple Silicon (the quantized model the shipped artifact
+    was embedded with), otherwise sentence-transformers on CUDA when available, CPU if
+    not. Model weights download from Hugging Face on first ever use, then it is fully
+    offline -- no API key, no network, no per-request cost.
+
+    Returns:
+        A function embedding one text into a unit-norm vector in the artifact's space.
+    """
+    global _local_embed
+    if _local_embed is not None:
+        return _local_embed
+    import platform as _platform
+
+    if _platform.system() == "Darwin" and _platform.machine() == "arm64":
+        import mlx.core as mx
+        from mlx_embeddings import generate, load
+
+        model, tokenizer = load(EMBED_MODEL_MLX)
+
+        def embed(text: str) -> np.ndarray:
+            """Embed one text via mlx_embeddings (pooling/normalization are the package's)."""
+            out = generate(model, tokenizer, texts=[text])
+            return np.array(out.text_embeds.astype(mx.float32))[0].astype(float)
+
+        logger.info(f"embedding: local mlx {EMBED_MODEL_MLX}")
+    else:
+        from sentence_transformers import SentenceTransformer
+
+        st = SentenceTransformer(EMBED_MODEL_TORCH)
+
+        def embed(text: str) -> np.ndarray:
+            """Embed one text via sentence-transformers, unit-normalized."""
+            return st.encode([text], normalize_embeddings=True)[0].astype(float)
+
+        logger.info(f"embedding: local {st.device} {EMBED_MODEL_TORCH}")
+    _local_embed = embed
+    return embed
+
+
+def ensure_artifact(artifact_dir: pathlib.Path) -> None:
+    """Download the default router artifact from Hugging Face if not already on disk.
+
+    Follows the HF resolve redirect manually so the Authorization header (needed while
+    the repo is private; harmless once public) is never forwarded to the CDN, which
+    rejects requests carrying both a signed URL and an auth header.
+
+    Args:
+        artifact_dir: Directory the router.{json,npz} pair should live in.
+
+    Raises:
+        urllib.error.URLError: If the artifact can't be fetched (no network, bad token).
+    """
+    missing = [n for n in (ARTIFACT_JSON, ARTIFACT_NPZ) if not (artifact_dir / n).exists()]
+    if not missing:
+        return
+    load_env(ENV_FILE)  # HF_TOKEN, if the artifact repo is private
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for name in missing:
+        url = f"https://huggingface.co/{HF_ARTIFACT_REPO}/resolve/main/{name}"
+        logger.info(f"artifact: downloading {name} from {HF_ARTIFACT_REPO} ...")
+        req = urllib.request.Request(url, headers={"User-Agent": "coding-router"})
+        token = os.environ.get("HF_TOKEN")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            resp = opener.open(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            resp = urllib.request.urlopen(  # noqa: S310 -- redirect target from HF itself
+                urllib.request.Request(e.headers["Location"],
+                                       headers={"User-Agent": "coding-router"}), timeout=60)
+        with resp:
+            data = resp.read()
+        tmp = artifact_dir / f"{name}.tmp"
+        tmp.write_bytes(data)
+        tmp.replace(artifact_dir / name)
+        logger.info(f"artifact: saved {artifact_dir / name} ({len(data):,} bytes)")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Turn redirects into HTTPError so ensure_artifact can re-request without auth."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 -- trivial override
+        return None
+
+
 SUMMARY_MODEL = "gpt-5.4-nano"
 SUMMARY_CACHE_CAP = 512
 
@@ -561,7 +669,8 @@ def summarize_segment(text: str, client: openai.OpenAI, model: str) -> str:
 
     Args:
         text: The rendered message previews making up this segment.
-        client: OpenAI client used for the summarization call.
+        client: OpenAI-protocol client for the summarization call (OpenAI direct, or
+            OpenRouter in `--via=openrouter` mode -- Chat Completions works on both).
         model: Model to summarize with (cheap and fast matters more than eloquence).
 
     Returns:
@@ -575,13 +684,14 @@ def summarize_segment(text: str, client: openai.OpenAI, model: str) -> str:
         # Generous cap on purpose: reasoning tokens count against it, and an unused
         # cap is free (see AgentRunner.MIN_MAX_TOKENS for the measured version of
         # this lesson).
-        r = client.responses.create(
-            model=model, reasoning={"effort": "low"}, max_output_tokens=4_000,
-            input="Summarize this segment of a coding-agent conversation in under 120 "
-                  "words. Keep only what matters for judging task difficulty and "
-                  "progress: what was attempted, key files/commands/errors, and current "
-                  "blockers. No preamble.\n\n" + text)
-        out = (r.output_text or "").strip() or text[:600]
+        r = client.chat.completions.create(
+            model=model, reasoning_effort="low", max_completion_tokens=4_000,
+            messages=[{"role": "user", "content":
+                       "Summarize this segment of a coding-agent conversation in under 120 "
+                       "words. Keep only what matters for judging task difficulty and "
+                       "progress: what was attempted, key files/commands/errors, and current "
+                       "blockers. No preamble.\n\n" + text}])
+        out = (r.choices[0].message.content or "").strip() or text[:600]
         logger.info(f"trajectory: summarized segment {key} ({len(text)} -> {len(out)} chars)")
     except Exception as e:  # noqa: BLE001 -- routing must degrade, never block dispatch
         out = text[:600]
@@ -648,21 +758,23 @@ def build_trajectory(messages: list[ChatMessage], client: openai.OpenAI,
     return "\n".join(parts)[:EMBED_BUDGET]
 
 
-def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic,
+def make_app(router: Router, openai_client: openai.OpenAI | None,
+            anthropic_client: anthropic.Anthropic | None,
             openrouter_client: openai.OpenAI | None = None,
             summary_model: str = SUMMARY_MODEL, summarize_middle: bool = True) -> FastAPI:
     """Build the FastAPI app exposing /v1/chat/completions and /v1/models.
 
+    Routing itself (embedding + kNN) runs fully locally -- the clients below exist
+    only to dispatch the chosen arm and to summarize long trajectories.
+
     Args:
         router: A loaded `Router` used for every routing decision.
-        openai_client: Used to embed every request (always), and to dispatch OpenAI
-            arms directly when `openrouter_client` is not given.
-        anthropic_client: Used to dispatch Anthropic arms directly; unused when
+        openai_client: Dispatches OpenAI arms and summarizes trajectories in direct
+            mode; None in `--via=openrouter` mode (OpenRouter covers both).
+        anthropic_client: Dispatches Anthropic arms directly; None when
             `openrouter_client` is given.
-        openrouter_client: If given, every dispatch goes through OpenRouter instead
-            of calling OpenAI/Anthropic directly. Embeddings still use `openai_client`
-            regardless, since routing decisions are only valid in the embedding space
-            the shipped artifact was built with.
+        openrouter_client: If given, every dispatch (and summarization) goes through
+            OpenRouter instead of calling OpenAI/Anthropic directly.
         summary_model: Model used to summarize older trajectory chunks.
         summarize_middle: If False, long conversations embed anchor + recent only
             (no summarization calls at all).
@@ -671,22 +783,15 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
         A FastAPI application ready to serve.
     """
     app = FastAPI()
+    if openrouter_client is None and (openai_client is None or anthropic_client is None):
+        raise ValueError("direct mode needs both an OpenAI and an Anthropic client")
+    local_embed = load_local_embedder()
+    # The guard above makes these casts honest: exactly one dispatch mode is fully wired.
+    summary_client = cast(openai.OpenAI, openrouter_client or openai_client)
 
     def embed_text(text: str) -> np.ndarray:
-        """Embed `text` with the router's embedding model, halving once on overflow.
-
-        The char budgets in build_trajectory are a heuristic against the model's
-        8,191-TOKEN limit; pathological tokenization (dense code/unicode) can still
-        overflow, so a token-limit rejection retries once at half length rather
-        than failing the request.
-        """
-        try:
-            e = openai_client.embeddings.create(model=router.meta["embed_model"],
-                                                input=text).data[0].embedding
-        except openai.BadRequestError:
-            e = openai_client.embeddings.create(model=router.meta["embed_model"],
-                                                input=text[:len(text) // 2]).data[0].embedding
-        return np.array(e, dtype=float)
+        """Embed `text` locally in the artifact's own vector space, in-process."""
+        return local_embed(text[:EMBED_BUDGET])
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -710,13 +815,15 @@ def make_app(router: Router, openai_client: openai.OpenAI, anthropic_client: ant
         stream = bool(body.get("stream"))
 
         t0 = time.perf_counter()
-        trajectory = build_trajectory(messages, openai_client, summary_model, summarize_middle)
+        trajectory = build_trajectory(messages, summary_client, summary_model, summarize_middle)
         decision = router.route_embedding(embed_text(trajectory))
         t_routed = time.perf_counter()
         tools = [parse_chat_tool(t) for t in (body.get("tools") or [])] or None
         message, usage = (dispatch_via_openrouter(decision, messages, tools, openrouter_client)
                           if openrouter_client
-                          else dispatch(decision, messages, tools, openai_client, anthropic_client))
+                          else dispatch(decision, messages, tools,
+                                        cast(openai.OpenAI, openai_client),
+                                        cast(anthropic.Anthropic, anthropic_client)))
         t_done = time.perf_counter()
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -806,13 +913,16 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
          summarize: bool = True, summary_model: str = SUMMARY_MODEL) -> None:
     """Start the router-proxy server.
 
+    Routing runs fully locally (in-process embeddings + kNN over the artifact); API
+    keys are only for dispatching the chosen model and summarizing long trajectories.
+
     Args:
         port: Local TCP port to serve on.
-        artifact_dir: Directory holding router_v0.{json,npz}; defaults to ./results.
+        artifact_dir: Directory holding router.{json,npz}; defaults to ./results, and
+            the default artifact is downloaded from Hugging Face if missing.
         via: "direct" dispatches to OpenAI/Anthropic with their own keys (default).
-            "openrouter" dispatches everything through one OpenRouter key instead.
-            Embeddings always use a direct OpenAI key either way -- the shipped
-            artifact's routing decisions are only valid in that embedding space.
+            "openrouter" dispatches everything through one OpenRouter key instead --
+            no other key needed.
         summarize: Summarize older messages (cached, one cheap call per ~6 messages)
             when a conversation outgrows the embedding budget. `--nosummarize` falls
             back to embedding just the task anchor + most recent messages.
@@ -822,11 +932,8 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
     # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
     # OpenAI/Anthropic SDKs' HTTP layer); print never showed them, so gate them out.
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    openai_key = ensure_key("OPENAI_API_KEY", "https://platform.openai.com/api-keys",
-                            lambda k: openai.OpenAI(api_key=k).models.list())
-    openai_client = openai.OpenAI(api_key=openai_key)
 
-    anthropic_client = openrouter_client = None
+    openai_client = anthropic_client = openrouter_client = None
     if via == "openrouter":
         openrouter_key = ensure_key("OPENROUTER_API_KEY", "https://openrouter.ai/keys",
                                     lambda k: openai.OpenAI(api_key=k, base_url=OPENROUTER_BASE_URL)
@@ -834,12 +941,19 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
                                         model="openai/gpt-4o-mini",
                                         messages=[{"role": "user", "content": "hi"}], max_tokens=1))
         openrouter_client = openai.OpenAI(api_key=openrouter_key, base_url=OPENROUTER_BASE_URL)
+        if "/" not in summary_model:
+            summary_model = f"openai/{summary_model}"  # OpenRouter namespaces models
     else:
+        openai_key = ensure_key("OPENAI_API_KEY", "https://platform.openai.com/api-keys",
+                                lambda k: openai.OpenAI(api_key=k).models.list())
+        openai_client = openai.OpenAI(api_key=openai_key)
         anthropic_key = ensure_key("ANTHROPIC_API_KEY", "https://console.anthropic.com/settings/keys",
                                    lambda k: anthropic.Anthropic(api_key=k).models.list())
         anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
 
-    router = Router(artifact_dir or str(ROOT / "results"))
+    art_dir = pathlib.Path(artifact_dir) if artifact_dir else ROOT / "results"
+    ensure_artifact(art_dir)
+    router = Router(art_dir)
     app = make_app(router, openai_client, anthropic_client, openrouter_client,
                    summary_model=summary_model, summarize_middle=summarize)
     logger.info(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}, "

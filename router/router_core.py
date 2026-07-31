@@ -20,9 +20,8 @@ from pydantic import BaseModel, ConfigDict
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 PRICE_FETCH_DATE = "2026-07-28"
-ARTIFACT_JSON = "router_v0.json"
-ARTIFACT_NPZ = "router_v0.npz"
-EMBED_MODEL = "text-embedding-3-large"
+ARTIFACT_JSON = "router.json"
+ARTIFACT_NPZ = "router.npz"
 
 logger = logging.getLogger(__name__)
 
@@ -286,56 +285,27 @@ class Router:
                         off_distribution=off, fallback_used=fb,
                         request_kwargs=spec.request_kwargs)
 
-    def route(self, task_text: str, *, api_key: str | None = None,
-             base_url: str | None = None) -> Decision:
-        """Embed `task_text` with the artifact's embedding model, then route.
-
-        Args:
-            task_text: The raw task/issue text to route (truncated to 8000 chars).
-            api_key: OpenAI API key; falls back to the client default, or "not-needed"
-                when `base_url` points at a local server that ignores auth.
-            base_url: Overrides the artifact's own `embed_base_url` (present when
-                `embed_model` isn't actually hosted by OpenAI -- e.g. a local server).
-
-        Returns:
-            The routing `Decision` for this task.
-        """
-        import openai  # deferred: keeps this module import-light enough to drop into
-
-        base_url = base_url or self.meta.get("embed_base_url")
-        cl = openai.OpenAI(api_key=api_key or ("not-needed" if base_url else None),
-                           base_url=base_url)
-        e = cl.embeddings.create(model=self.meta["embed_model"],
-                                 input=task_text[:8000]).data[0].embedding
-        return self.route_embedding(np.array(e, dtype=float))
-
-
 def main_predict(artifact_dir: str = "results") -> None:
     """CLI (`demo`): load the router artifact and route one demo task, printing the decision.
 
     Args:
-        artifact_dir: Directory holding the router_v0.{json,npz} artifact.
+        artifact_dir: Directory holding the router.{json,npz} artifact (auto-downloaded
+            from Hugging Face if missing).
     """
-    import os as _os
+    # Deferred: serve owns env loading, artifact download, and the local embedding
+    # backend; importing it here keeps this module import-light for library users
+    # (who call route_embedding with their own vectors and never pay these imports).
+    from router.serve import ensure_artifact, load_env, load_local_embedder
 
-    # Demo convenience only. The module itself never reads a .env, so it stays droppable
-    # into a service that manages its own credentials.
-    for cand in (pathlib.Path.cwd() / ".env.local",
-                 pathlib.Path(__file__).resolve().parent.parent / ".env.local"):
-        if cand.exists():
-            for line in cand.read_text().splitlines():
-                if "=" in line and not line.lstrip().startswith("#"):
-                    k, v = line.split("=", 1)
-                    _os.environ.setdefault(k.strip(), v.strip())
-            break
-
+    load_env()
+    ensure_artifact(pathlib.Path(artifact_dir))
     r = Router(artifact_dir)
     logger.info(f"loaded: {len(r.arms)} arms, {r.emb.shape[0]} labelled tasks, "
                 f"k={r.k} tau={r.tau} sim_floor={r.sim_floor}")
     logger.info(f"provenance: {r.meta['provenance']}")
     demo = ("Fix a race condition in the connection pool so concurrent checkouts "
             "cannot hand the same connection to two callers.")
-    d = r.route(demo)
+    d = r.route_embedding(load_local_embedder()(demo))
     logger.info(f"\nrouted -> {d.model} effort={d.effort}  p_solve={d.p_solve:.2f} "
                 f"est ${d.est_cost_usd:.2f}  nearest_sim={d.nearest_sim:.3f} "
                 f"off_dist={d.off_distribution} fallback={d.fallback_used}")

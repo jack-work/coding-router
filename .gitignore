@@ -12,3 +12,5 @@ __pycache__/
 .ruff_cache/
 .ty_cache/
 *.egg-info/
+results/router.json
+results/router.npz

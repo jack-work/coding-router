@@ -6,9 +6,13 @@ dependencies = [
     "anthropic>=0.120.2",
     "fastapi>=0.141.1",
     "fire>=0.7.1",
+    # Local routing embeddings (Qwen3-Embedding-0.6B): MLX on Apple Silicon, torch
+    # (CUDA when available) everywhere else. Routing never calls an embeddings API.
+    "mlx-embeddings>=0.1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "numpy>=2.5.1",
     "openai>=2.50.0",
     "pydantic>=2.13.4",
+    "sentence-transformers>=3.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
     "uvicorn>=0.52.0",
 ]
 
