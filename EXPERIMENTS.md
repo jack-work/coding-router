@@ -518,3 +518,13 @@ real quality cost (CI excludes 0) and does not dominate the factor-head champion
 **Verdict.** Geometry fine-tuning at 8B is viable but not worth it on this data size;
 champion unchanged. If more labelled tasks ever arrive, revisit (the slow-overfit
 trend suggests 8B LoRA scales with n better than 0.6B).
+
+---
+
+## Notion mirror (2026-07-31)
+
+Parent "DeepSWE Router" page recalibrated (status header + standing rules; sibling's
+held-out-oracle analysis preserved as canonical). Full experiment log mirrored to child
+page "RL routing lane - experiment log (EXP-001-018)":
+https://app.notion.com/p/3af0f8b3f591812598a6efa3fb9e66fe
+Per-experiment updates continue there per the standing goal.
