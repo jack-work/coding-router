@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import pathlib
+import platform
 import sys
 from typing import Any
 
@@ -231,6 +232,11 @@ class Router:
         self.med_cost = med_cost
         self.fallback = fallback
         self._order = np.argsort(self.med_cost)      # cheapest arm first
+        self.rule = f"k={self.k} tau={self.tau}"     # one-line summary for startup logs
+
+    def embed_models(self) -> tuple[str, str] | None:
+        """(mlx, torch) embedding model ids to route in, or None for serve's defaults."""
+        return None
 
     # ---------------------------------------------------------------- internals
     def _probs(self, v: np.ndarray) -> tuple[np.ndarray, float]:
@@ -285,6 +291,144 @@ class Router:
                         off_distribution=off, fallback_used=fb,
                         request_kwargs=spec.request_kwargs)
 
+
+class TrainedRouter:
+    """Trained router (EXP-012 winner `reward_lcb_b0.2`): a LoRA-tuned
+    Qwen3-Embedding-0.6B encoder plus a temperature-`T` softmax vote over the full
+    110-task DeepSWE evidence bank, deployed as argmax of the trained utility
+    u = P(solve) - lam * med_cost -- the exact decision rule the EXP-012 sweep
+    certified (6-seed selected-holdout mean graded 0.9484 at 2.1x cheaper than the
+    deployable always-best-train baseline 0.9336/$126.28 per split; parity, not
+    better, vs the hindsight-best static arm). This is deliberately NOT the kNN
+    kind's cheapest-arm-above-tau walk: shipping any rule other than the one the
+    sweep evaluated would void those numbers.
+
+    Abstention: when no bank task is within `sim_floor` cosine similarity the vote
+    is off-distribution and the router escalates to the strongest arm
+    (`fallback_arm_index`) instead of trusting the utility argmax -- identical
+    semantics to the kNN kind (escalation costs money, never accuracy). That is
+    the trained kind's only abstention: the utility argmax itself always picks.
+    """
+
+    def __init__(self, artifact_dir: str | pathlib.Path, *,
+                 artifact_json: str = ARTIFACT_JSON, artifact_npz: str = ARTIFACT_NPZ,
+                 providers: set[str] | None = None):
+        """Load an exported trained-router artifact.
+
+        Args:
+            artifact_dir: Directory containing the artifact's `.json`/`.npz` pair
+                (and, beside them, the tuned encoder directories once downloaded).
+            artifact_json: Filename of the metadata JSON within `artifact_dir`.
+            artifact_npz: Filename of the numpy archive within `artifact_dir`.
+            providers: If given, restricts the arm pool to those providers, exactly
+                as in `Router` (fallback recomputed within the restricted pool).
+
+        Raises:
+            ValueError: If restricting to `providers` would leave no arms at all.
+        """
+        p = pathlib.Path(artifact_dir)
+        meta = json.loads((p / artifact_json).read_text())
+        arr = np.load(p / artifact_npz)
+        self.meta = meta
+        self._dir = p
+        arms: list[str] = meta["arms"]
+        arm_spec = {k: ArmSpec.model_validate(v) for k, v in meta["arm_spec"].items()}
+        graded: np.ndarray = arr["graded"]      # (n_arms, n_tasks) float in [0, 1]
+        med_cost: np.ndarray = arr["med_cost"]  # (n_arms,) median $/task over the bank
+        fallback = int(meta["fallback_arm_index"])
+        if providers is not None:
+            keep = [i for i, a in enumerate(arms) if arm_spec[a].provider in providers]
+            if not keep:
+                raise ValueError(f"no arms left after filtering to providers={providers}")
+            arms = [arms[i] for i in keep]
+            graded = graded[keep]
+            med_cost = med_cost[keep]
+            fallback = int(np.argmax(graded.mean(axis=1)))
+        self.arms = arms
+        self.arm_spec: dict[str, ArmSpec] = arm_spec
+        self.T: float = meta["T"]                # trained soft-vote temperature
+        self.lam: float = meta["lam"]            # selected cost weight in the utility
+        self.sim_floor: float = meta["sim_floor"]
+        self.emb: np.ndarray = arr["emb"]        # (n_tasks, dim) L2-normalised bank
+        self.graded = graded
+        self.med_cost = med_cost
+        self.fallback = fallback
+        self.rule = f"T={self.T:.4f} lam={self.lam}"
+
+    def embed_models(self) -> tuple[str, str]:
+        """Resolve the tuned encoder's (mlx, torch) local paths, downloading first.
+
+        The tuned encoder is part of the artifact (bank and queries must share one
+        vector space), so fetching it belongs to artifact loading; only the missing
+        platform-appropriate directory is downloaded, from the same repo as the
+        `.json`/`.npz` pair (`meta["hf_repo"]`), via huggingface_hub -- already a
+        dependency of both embedding backends.
+
+        Returns:
+            Local (mlx, torch) encoder directory paths for `load_local_embedder`.
+        """
+        on_mac = platform.system() == "Darwin" and platform.machine() == "arm64"
+        sub = self.meta["embed_model_mlx"] if on_mac else self.meta["embed_model_torch"]
+        if not (self._dir / sub).exists():
+            from huggingface_hub import snapshot_download
+
+            logger.info(f"artifact: downloading tuned encoder {sub} from {self.meta['hf_repo']} ...")
+            snapshot_download(self.meta["hf_repo"], allow_patterns=[f"{sub}/*"],
+                              local_dir=str(self._dir))
+        return (str(self._dir / self.meta["embed_model_mlx"]),
+                str(self._dir / self.meta["embed_model_torch"]))
+
+    def route_embedding(self, v: np.ndarray) -> Decision:
+        """Route from a pre-computed embedding in the TUNED encoder's vector space.
+
+        Args:
+            v: The task embedding. Normalised internally if not already unit-length.
+
+        Returns:
+            The routing `Decision`: chosen arm, predicted odds, and request kwargs.
+
+        Raises:
+            ValueError: If `v` is the zero vector and cannot be normalised.
+        """
+        v = np.asarray(v, dtype=float)
+        n = np.linalg.norm(v)
+        if n == 0:
+            raise ValueError("zero embedding")
+        v = v / n
+        sims = self.emb @ v
+        nearest = float(sims.max())
+        w = np.exp((sims - sims.max()) / self.T)
+        p = self.graded @ (w / w.sum())          # per-arm expected graded = P(solve)
+        pick = int(np.argmax(p - self.lam * self.med_cost))
+        off = nearest < self.sim_floor
+        fb = off
+        if off:
+            pick = self.fallback
+        spec = self.arm_spec[self.arms[pick]]
+        return Decision(model=spec.model, effort=spec.effort,
+                        arm_id=self.arms[pick], p_solve=float(p[pick]),
+                        est_cost_usd=float(self.med_cost[pick]), nearest_sim=nearest,
+                        off_distribution=off, fallback_used=fb,
+                        request_kwargs=spec.request_kwargs)
+
+
+def load_router(artifact_dir: str | pathlib.Path, *,
+                providers: set[str] | None = None) -> Router | TrainedRouter:
+    """Load whichever router kind the artifact's metadata declares.
+
+    Args:
+        artifact_dir: Directory containing router.json/router.npz.
+        providers: Optional provider restriction, forwarded to the router class.
+
+    Returns:
+        A `TrainedRouter` when `meta["kind"] == "trained"`, else the kNN `Router`
+        (artifacts predating the `kind` field are all kNN -- the rollback path).
+    """
+    meta = json.loads((pathlib.Path(artifact_dir) / ARTIFACT_JSON).read_text())
+    cls = TrainedRouter if meta.get("kind", "knn") == "trained" else Router
+    return cls(artifact_dir, providers=providers)
+
+
 def main_predict(artifact_dir: str = "results") -> None:
     """CLI (`demo`): load the router artifact and route one demo task, printing the decision.
 
@@ -295,17 +439,24 @@ def main_predict(artifact_dir: str = "results") -> None:
     # Deferred: serve owns env loading, artifact download, and the local embedding
     # backend; importing it here keeps this module import-light for library users
     # (who call route_embedding with their own vectors and never pay these imports).
-    from router.serve import ensure_artifact, load_env, load_local_embedder
+    from router.serve import (
+        EMBED_MODEL_MLX,
+        EMBED_MODEL_TORCH,
+        ensure_artifact,
+        load_env,
+        load_local_embedder,
+    )
 
     load_env()
     ensure_artifact(pathlib.Path(artifact_dir))
-    r = Router(artifact_dir)
+    r = load_router(artifact_dir)
+    embedder = load_local_embedder(*(r.embed_models() or (EMBED_MODEL_MLX, EMBED_MODEL_TORCH)))
     logger.info(f"loaded: {len(r.arms)} arms, {r.emb.shape[0]} labelled tasks, "
-                f"k={r.k} tau={r.tau} sim_floor={r.sim_floor}")
+                f"{r.rule} sim_floor={r.sim_floor}")
     logger.info(f"provenance: {r.meta['provenance']}")
     demo = ("Fix a race condition in the connection pool so concurrent checkouts "
             "cannot hand the same connection to two callers.")
-    d = r.route_embedding(load_local_embedder()(demo))
+    d = r.route_embedding(embedder(demo))
     logger.info(f"\nrouted -> {d.model} effort={d.effort}  p_solve={d.p_solve:.2f} "
                 f"est ${d.est_cost_usd:.2f}  nearest_sim={d.nearest_sim:.3f} "
                 f"off_dist={d.off_distribution} fallback={d.fallback_used}")

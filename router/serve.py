@@ -32,7 +32,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from router.router_core import ARTIFACT_JSON, ARTIFACT_NPZ, STANDARD, Decision, Router
+from router.router_core import (
+    ARTIFACT_JSON,
+    ARTIFACT_NPZ,
+    STANDARD,
+    Decision,
+    Router,
+    TrainedRouter,
+    load_router,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.local"
@@ -559,13 +567,15 @@ EMBED_MODEL_TORCH = "Qwen/Qwen3-Embedding-0.6B"
 _local_embed: Callable[[str], np.ndarray] | None = None
 
 
-def load_local_embedder() -> Callable[[str], np.ndarray]:
+def load_local_embedder(mlx_model: str = EMBED_MODEL_MLX,
+                        torch_model: str = EMBED_MODEL_TORCH) -> Callable[[str], np.ndarray]:
     """Load the local Qwen3 embedding backend once and return the embed function.
 
     Backend selection: MLX on Apple Silicon (the quantized model the shipped artifact
     was embedded with), otherwise sentence-transformers on CUDA when available, CPU if
-    not. Model weights download from Hugging Face on first ever use, then it is fully
-    offline -- no API key, no network, no per-request cost.
+    not. `mlx_model`/`torch_model` may be local paths (a trained artifact's tuned
+    encoder) or hub ids; weights download from Hugging Face on first ever use, then it
+    is fully offline -- no API key, no network, no per-request cost.
 
     Returns:
         A function embedding one text into a unit-norm vector in the artifact's space.
@@ -579,24 +589,24 @@ def load_local_embedder() -> Callable[[str], np.ndarray]:
         import mlx.core as mx
         from mlx_embeddings import generate, load
 
-        model, tokenizer = load(EMBED_MODEL_MLX)
+        model, tokenizer = load(mlx_model)
 
         def embed(text: str) -> np.ndarray:
             """Embed one text via mlx_embeddings (pooling/normalization are the package's)."""
             out = generate(model, tokenizer, texts=[text])
             return np.array(out.text_embeds.astype(mx.float32))[0].astype(float)
 
-        logger.info(f"embedding: local mlx {EMBED_MODEL_MLX}")
+        logger.info(f"embedding: local mlx {mlx_model}")
     else:
         from sentence_transformers import SentenceTransformer
 
-        st = SentenceTransformer(EMBED_MODEL_TORCH)
+        st = SentenceTransformer(torch_model)
 
         def embed(text: str) -> np.ndarray:
             """Embed one text via sentence-transformers, unit-normalized."""
             return st.encode([text], normalize_embeddings=True)[0].astype(float)
 
-        logger.info(f"embedding: local {st.device} {EMBED_MODEL_TORCH}")
+        logger.info(f"embedding: local {st.device} {torch_model}")
     _local_embed = embed
     return embed
 
@@ -758,7 +768,7 @@ def build_trajectory(messages: list[ChatMessage], client: openai.OpenAI,
     return "\n".join(parts)[:EMBED_BUDGET]
 
 
-def make_app(router: Router, openai_client: openai.OpenAI | None,
+def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None,
             anthropic_client: anthropic.Anthropic | None,
             openrouter_client: openai.OpenAI | None = None,
             summary_model: str = SUMMARY_MODEL, summarize_middle: bool = True) -> FastAPI:
@@ -785,7 +795,8 @@ def make_app(router: Router, openai_client: openai.OpenAI | None,
     app = FastAPI()
     if openrouter_client is None and (openai_client is None or anthropic_client is None):
         raise ValueError("direct mode needs both an OpenAI and an Anthropic client")
-    local_embed = load_local_embedder()
+    local_embed = load_local_embedder(*(router.embed_models()
+                                        or (EMBED_MODEL_MLX, EMBED_MODEL_TORCH)))
     # The guard above makes these casts honest: exactly one dispatch mode is fully wired.
     summary_client = cast(openai.OpenAI, openrouter_client or openai_client)
 
@@ -953,10 +964,10 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
 
     art_dir = pathlib.Path(artifact_dir) if artifact_dir else ROOT / "results"
     ensure_artifact(art_dir)
-    router = Router(art_dir)
+    router = load_router(art_dir)
     app = make_app(router, openai_client, anthropic_client, openrouter_client,
                    summary_model=summary_model, summarize_middle=summarize)
-    logger.info(f"ready: {len(router.arms)} arms, k={router.k} tau={router.tau}, via={via}, "
+    logger.info(f"ready: {len(router.arms)} arms, {router.rule}, via={via}, "
                 f"summarize={summarize}")
 
     if telemetry_enabled():

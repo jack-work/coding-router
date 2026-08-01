@@ -1,19 +1,43 @@
 # Using the exported router
 
-## Files (1.05 MB total, self-contained)
-- `results/router_v0.npz` — task embeddings, per-arm outcomes, per-arm median cost
-- `results/router_v0.json` — arm list, model+effort mapping, hyperparameters, provenance, scope
-- `router/router_core.py` — the only code needed at inference (`Router`/`Decision`). Deps: `numpy`, `openai` (embeddings only).
+Two artifact kinds share one file pair (`router.json` + `router.npz`); `meta["kind"]`
+selects the loader. `load_router()` returns the right class either way — the kNN kind
+keeps working unchanged and is the rollback path.
+
+## kNN kind (`kind` absent or `"knn"`)
+- `router.npz` — task embeddings (`emb`), per-arm outcomes (`resolved`, bool), per-arm median cost (`med_cost`)
+- `router.json` — arm list, `arm_spec`, `k`/`tau`/`sim_floor`, provenance, scope
+- Decision: weighted k-nearest vote → cheapest arm with P(solve) ≥ `tau`, escalate on
+  fallback/off-distribution.
+
+## Trained kind (`kind == "trained"`, EXP-012 winner `reward_lcb_b0.2`)
+- `router.npz` — `emb` (110-task DeepSWE bank in the TUNED encoder's space, fp32),
+  `graded` (41×110 float outcomes — the calibration side of the vote), `med_cost` (41,)
+- `router.json` — everything above plus `T` (trained soft-vote temperature), `lam`
+  (selected cost weight), `embed_model_mlx`/`embed_model_torch` (encoder dir names
+  beside the artifact in `hf_repo`), and provenance incl. the selection policy
+- Encoder, one artifact, two formats (bank and queries must share one vector space):
+  - `encoder-fp16/` — merged LoRA→base Qwen3-Embedding-0.6B, safetensors; loads via
+    sentence-transformers/transformers (CUDA/CPU)
+  - `encoder-mlx-4bit/` — the same merged encoder quantized 4-bit (group 64) for
+    Apple Silicon; loads via `mlx_embeddings`
+- Decision: softmax(sims / `T`) vote over the bank → per-arm P(solve) → argmax of
+  u = P(solve) − `lam`·`med_cost` (the exact rule EXP-012 certified — deliberately NOT
+  the kNN cheapest-above-tau walk). Abstention: `nearest_sim < sim_floor` escalates to
+  the strongest arm; that is the trained kind's only abstention.
 
 ## Use
 ```python
-from router.router_core import Router
-r = Router("results")
-d = r.route(issue_text)           # or r.route_embedding(vec) if you embed yourself
+from router.router_core import load_router
+r = load_router("results")        # kNN or trained, per the artifact's meta
+d = r.route_embedding(vec)         # embed with the artifact's own encoder (see below)
 if d.off_distribution:
     ...                            # it abstained; it returned the strongest arm
 client.messages.create(**d.request_kwargs, messages=[...])
 ```
+Embedding must happen in the artifact's own vector space:
+`load_local_embedder(*(r.embed_models() or (EMBED_MODEL_MLX, EMBED_MODEL_TORCH)))`
+handles both kinds (a trained artifact's tuned encoder downloads on first use).
 `request_kwargs` is ready to splat into the Anthropic or OpenAI SDK and already encodes the
 measured API constraints (adaptive thinking + `output_config.effort` for Anthropic,
 `reasoning.effort` for OpenAI).
