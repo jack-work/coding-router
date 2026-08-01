@@ -732,3 +732,27 @@ two live LCB A/Bs (EXP-010, EXP-011): per-turn == turn0 quality at higher cost.
 A/B, and now an information analysis with the correct instrument: route ONCE from the
 task text. Reopen only if switch cost collapses (same-provider, cache-preserving
 handoff) or on a domain with far larger arm spread than DeepSWE.
+
+## EXP-023 — anchor-strength sweep + slate variants (RUNNING, 2026-08-01)
+
+GPUs were idle after the confirmation batch; refilled with the free (GPU-only) queue,
+now using the parallel-per-GPU pattern (each job ~10GB of 94GB, 3 co-resident).
+
+**GPU0 — anchor-strength sweep.** beta in {0.1, 0.35, 0.6} x grpo/dswe x seeds 0-11
+(selection AND fresh in one pass, since fresh confirmation is required anyway). The
+confirmed champion is beta=0.2 at 2.79x/parity; this locates the optimum and tests
+whether the anchor effect is monotone (evidence it is mechanistic rather than lucky:
+beta=0.05 did nothing, 0.2 worked).
+
+**GPU1 — slate randomization.** (a) anchored slate (grpo/dswe/beta0.2, 8 held-out
+arms), (b) slate on the srb source, (c) fresh-seed slate confirmation (seeds 6-11).
+Tests whether arm-set-invariant training composes with the anchor, and whether the
+zero-shot-new-arm property (EXP-013: unseen 8-arm pool routed at 0.920) holds on fresh
+seeds.
+
+**Bug fixed:** v6's slate-size floor was hardcoded at 8, impossible for the 4-arm srb
+pool (ValueError: low >= high). Now adapts: lo = min(8, max(2, n_trainable//2)).
+
+Gated on Kion (external spend, not GPU): live closed-loop GRPO (~$1.5-3k) and the
+>=2-trial live pass (~$3-4k). After EXP-021 the 2-trial pass ranks first — single-trial
+live cells are why live routing works at the cheap end but not the quality end.
