@@ -211,6 +211,41 @@ Relative arm ordering may survive; absolutes do not. The live confirmation batch
 therefore re-benchmark the router's candidate arms live (budgeted), and live rewards
 always use live costs.
 
+## EXP-018 — held-out oracle gate: QUALITY routing on DeepSWE 1.1 is dead (2026-07-31)
+
+**Trigger.** The sibling lane's Notion verdict (DeepSWE Router parent page, 2026-07-30):
+naive per-task oracles are winner's-curse artifacts; with a HELD-OUT oracle (choose each
+task's arm on half the attempts, score on the other half) their 9-arm headroom collapsed
+to +1.18pts, CI includes 0. Kion had independently flagged the same ill-posedness.
+
+**Replication on OUR 41-arm pool (113 tasks, 400 resamples, trials.json per-attempt):**
+naive oracle 0.9987 -> held-out oracle 0.9619 [0.9458, 0.9757]; best static arm
+0.9554 (opus_5_high). Honest quality headroom +0.0065 — includes zero. CONFIRMED.
+
+**RETRACTION (canonical, single):** every naive-oracle quantity in this journal is
+withdrawn — the luna-audit "best-of-frontier 0.987 / -0.042 headroom / 46 more solved
+tasks", EXP-015's planned oracle rows, and any "routing quality prize" framing. The
+held-out numbers above replace them.
+
+**What SURVIVES (and why).** All router evaluations in this journal choose arms from
+TRAIN-fold data and never see test attempts, so they carry no attempt-level winner's
+curse. Their claims were parity-quality (CIs include 0) at 4-8x lower cost — exactly
+what a quality-saturated benchmark predicts: the router cannot and does not harvest
+quality; it harvests the COST spread (real, measured, ~100x across arms). The program's
+honest identity from here: **cost optimization at quality parity**, not quality routing.
+
+**Consequences.**
+1. EXP-012's quality-first framing is correct and unchanged (parity is the ceiling, so
+   guard it and maximize savings).
+2. Per-turn routing for QUALITY on DeepSWE 1.1 published data: dead — if per-task
+   exploitable interaction is ~0, trajectory-conditioned quality gains cannot be shown
+   there. Per-turn survives as (a) a cost play, (b) on live current models IF drift
+   reopened headroom (requires >=2 live trials/cell for a held-out oracle — EXP-015 is
+   1-trial; a second-trial pass on a subset is budgeted), or (c) on a benchmark with
+   real headroom (sibling lane points at the ACRouter regime, ~13pt static-to-oracle gap).
+3. Standing gate (adopted): compute a held-out oracle BEFORE designing any router
+   against any matrix.
+
 ## EXP-011 — per-turn routing under injected difficulty (RUNNING, 2026-07-31)
 
 **Motivation.** EXP-010 found no per-turn advantage on LCB because easy episodes offer
