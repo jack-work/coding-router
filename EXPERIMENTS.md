@@ -573,3 +573,56 @@ evidence appears at 59-84% of trajectory depth. Flagship live run = per-task clo
 trainer, no watch-then-route detour. Caveat: pooled-linear probe of prefix embeddings;
 engineered prefix features (explicit test-pass/error state) untested, but the monotone
 decline is a strong prior against.
+
+## EXP-017d/019 — MAJOR NEGATIVE: no task-conditional routing signal (2026-08-01)
+
+Triggered by Kion: "R^2 is probably not capturing relationship." Correct — the earlier
+probe was an ADDITIVE ridge (embedding + arm one-hots), which by construction cannot
+represent the arm x task interaction routing depends on, and R^2 on bounded,
+zero-inflated f2p measures mass-fitting not discrimination. Redone with per-arm models
+(full interaction), AUC, within-task rank correlation, and a shuffled-label null.
+
+**1. Arm discrimination — nothing.** Within-task Spearman across arms: task-text model
+0.638 vs TASK-BLIND arm-base-rates-only 0.645. Reading the task adds nothing to
+deciding which arm suits it. (Per-arm R^2: 0.332 vs task-blind 0.319.)
+
+**2. Difficulty prediction — nothing.** Predicting per-task mean f2p from task text,
+leave-one-repo-out: R^2 = -0.013 (worse than the mean), Spearman +0.135, n=113.
+
+**3. Per-arm success prediction on LIVE data — nothing, vs a proper null.** 5-fold
+grouped CV (leave-one-repo-out was invalid here: singleton repos make it leave-one-out,
+whose base-rate shift is anti-correlated with the held-out label — that produced the
+absurd AUC~0.00 readings). Real AUCs 0.292-0.488 vs shuffled-label controls
+0.370-0.421: every arm at or below its own null.
+
+**4. Trajectory depth — nothing, at any depth.** Per-arm AUC by prefix depth:
+0% 0.744 | 20% 0.746 | 40% 0.746 | 60% 0.747 | 80% 0.747 (within-task rho 0.638-0.645
+throughout). Flat. NB the 0.744 level is itself mostly arm-base-rate ranking, not task
+prediction.
+
+**5. Routers vs a PRICE-MATCHED static policy.** Sweeping the static-selection margin
+traces a control curve; interpolating it at each router's price: grpo-dswe-anchored
++0.017, grpo-srb +0.014, reward-lcb +0.008, frozen +0.008, grpo-dswe -0.000,
+reward-dswe -0.003. But the static curve is non-monotonic with ~±0.02 of its own noise
+(margin 0.005 -> 0.922 while margin 0.02 -> 0.944), so these are NOT resolvable.
+
+**RETRACTION.** The lane's headline "1.5-2.5x cost reduction at quality parity vs
+honest static selection" is withdrawn. That control was pinned at an expensive
+operating point (margin 0.01, $3.28/task); against a price-matched static policy the
+advantage is inside the noise, and the information analyses above say there is no
+task-conditional signal to have exploited in the first place. The apparent saving was
+OPERATING-POINT selection (choose a cheaper arm), not routing.
+
+**Independently replicates the sibling lane's Method C** ("three task representations
+have failed... per-task arm preference appears environment/repo-specific, not inferable
+from the problem statement") with two more representations (Qwen3-0.6B tuned/untuned),
+on LIVE current-model data, and with a shuffled-label null they did not run.
+
+**What survives.** (a) Live-harness infrastructure. (b) The drift finding: published
+matrices go quality-stale in weeks. (c) Methodology: held-out oracles, price-matched
+controls, shuffled-label nulls, the ~0.02 selection tax. (d) A robust negative result.
+(e) Product implication: the defensible artifact is continuous re-benchmarking +
+static arm selection at a chosen price point, NOT per-task routing.
+
+**Do not spend further on per-task routing against DeepSWE.** A benchmark with
+demonstrated task-conditional signal is a precondition for any resumption.
