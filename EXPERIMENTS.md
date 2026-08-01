@@ -227,12 +227,27 @@ withdrawn — the luna-audit "best-of-frontier 0.987 / -0.042 headroom / 46 more
 tasks", EXP-015's planned oracle rows, and any "routing quality prize" framing. The
 held-out numbers above replace them.
 
-**What SURVIVES (and why).** All router evaluations in this journal choose arms from
-TRAIN-fold data and never see test attempts, so they carry no attempt-level winner's
-curse. Their claims were parity-quality (CIs include 0) at 4-8x lower cost — exactly
-what a quality-saturated benchmark predicts: the router cannot and does not harvest
-quality; it harvests the COST spread (real, measured, ~100x across arms). The program's
-honest identity from here: **cost optimization at quality parity**, not quality routing.
+**What SURVIVES — the three-layer correction (Kion: "don't overfit to their lessons").**
+Layer 1 (our original claims): 4-8x cheaper vs always-best-train — INFLATED; that
+baseline is a winner's-curse-weakened policy and an expensive point on the frontier.
+Layer 2 (my first correction): <=1.22x vs the static Pareto frontier — DEFLATED; that
+check selected the comparison statics ON THE EVAL CELLS (argmax-on-test in the statics'
+favor — the mirror-image bias).
+Layer 3 (the honest control, all selection train-side): a STATIC-SELECTION POLICY
+(cheapest arm within a train-parity margin) scores 0.933 at $3.84/task (margin 0.01;
+0.936/$2.55 at margin 0.02) on fresh cells. Against it:
+| router | graded | $/task | dgraded (CI) | cost saving |
+|---|---|---|---|---|
+| frozen temps | 0.920 | $1.74 | -0.012 [-0.032, +0.009] | 2.2x |
+| factor champion | 0.910 | $1.27 | -0.022 [-0.053, +0.008] | 3.0x |
+| GRPO-LoRA | 0.907 | $0.95 | -0.025 [-0.050, +0.003] | 4.1x |
+| rank-LoRA | 0.886 | $0.81 | -0.046 [-0.073, -0.017] | 4.8x (real quality loss) |
+**Task-conditioned routing buys ~1.5-4x over honest static selection (margin-dependent)
+at quality deltas whose CIs include zero.** More modest than layer 1, far better than
+layer 2 or the sibling's 1.07x estimate. Quality-BEATING routing stays dead (held-out
+oracle, verified on our data — that part of the sibling lesson is sound and adopted);
+their other conclusions (cost prize 1.07x, "task statement carries no signal") are
+NOT imported — our data contradicts them under honest controls.
 
 **Consequences.**
 1. EXP-012's quality-first framing is correct and unchanged (parity is the ceiling, so
