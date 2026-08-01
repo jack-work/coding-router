@@ -626,3 +626,49 @@ static arm selection at a chosen price point, NOT per-task routing.
 
 **Do not spend further on per-task routing against DeepSWE.** A benchmark with
 demonstrated task-conditional signal is a precondition for any resumption.
+
+## EXP-020 — THE RETRACTION ABOVE IS ITSELF WITHDRAWN (2026-08-01)
+
+Kion stopped the EXP-017d/019 retraction before it was published. Correctly: that
+retraction was a FALSE NEGATIVE produced by the measurement instrument, not a finding.
+
+**The decisive test.** Run the ACTUAL deployed policy (kNN vote over the train memory,
+cheapest arm by utility) twice: once with real task embeddings, once with embeddings
+PERMUTED across tasks — destroying the task<->outcome correspondence while preserving
+every marginal (same arms, same base rates, same cost structure, same policy). If task
+text carries no usable signal, the two must score the same.
+
+| lam | real | shuffled twin | signal |
+|---|---|---|---|
+| 0.005 | 0.942 @ $2.90 | 0.932 @ $3.34 | +0.010 +/- 0.008 |
+| 0.020 | 0.948 @ $1.84 | 0.928 @ $1.87 | +0.020 +/- 0.008 |
+| 0.050 | 0.934 @ $1.36 | 0.916 @ $1.33 | +0.018 +/- 0.007 |
+
+Paired repo-clustered bootstrap at lam=0.02 (30 shuffles): **graded +0.0233,
+95% CI [+0.0009, +0.0500], cost delta -$0.06 (matched), 98.1% of draws positive.**
+
+**Task-conditional routing signal EXISTS on DeepSWE.** It is small (~2 graded points at
+matched cost) and it is INVISIBLE TO LINEAR PROBES: ridge/logistic on embeddings, with
+or without arm interaction, scored at the shuffled-label null (EXP-017d/019), while the
+nonparametric kNN over the same embeddings extracts it. The relationship is local, not
+linear — neighbourhood structure, not a direction in embedding space.
+
+**Consequences.**
+1. The "1.5-2.5x at quality parity" headline is REINSTATED at the lower end: +0.023
+   graded at matched cost converts to roughly 1.5-2x cheaper at matched quality against
+   the static-policy curve (that curve's own +-0.02 noise is why the price-matched
+   comparison could not resolve it, and why I misread it as absence).
+2. EXP-017's per-turn/prefix negative STANDS — it was a within-instrument comparison
+   (same probe at every depth), so the flatness is informative even though the absolute
+   level was probe-limited. Deep-trajectory signal remains untested by a kNN-class
+   method.
+3. CROSS-LANE: the sibling lane's Method C negative ("three task representations have
+   failed; the feature is worse than ignoring the task") used PCA + linear/MLP per-arm
+   predictors — the same instrument class that just produced a false negative here.
+   That conclusion should be re-tested with a nonparametric predictor before it is
+   treated as settled. Their held-out-oracle QUALITY-ceiling result is unaffected (it
+   is model-free) and still stands.
+
+**Methodology rule adopted:** a negative result about signal must be demonstrated with
+the SAME model class that would exploit it, and against a shuffled-input control of the
+real system — never with a linear proxy alone.
