@@ -716,6 +716,12 @@ def build_trajectory(messages: list[ChatMessage], client: openai.OpenAI,
                      summary_model: str, summarize_middle: bool = True) -> str:
     """Render the conversation as the routing-embedding input, within EMBED_BUDGET.
 
+    System-role messages are excluded entirely: a client's system prompt (opencode
+    ships ~12k chars of constant preamble + tool schemas) is near-identical bytes on
+    EVERY request, so embedding it homogenizes all trajectories toward one vector and
+    the router degenerates to a constant arm (measured in production). The task and
+    difficulty signals live in user/assistant/tool messages, which all stay.
+
     Conversations that fit are rendered whole -- the fast path, no model calls,
     byte-identical to pre-budget behavior. Past the budget: anchor + summarized
     middle + verbatim recent (see the budget comment above for why each part
@@ -736,12 +742,13 @@ def build_trajectory(messages: list[ChatMessage], client: openai.OpenAI,
     Returns:
         The trajectory text to embed, at most EMBED_BUDGET chars.
     """
-    previews = [message_preview(m) for m in messages]
+    routable = [m for m in messages if m.role != "system"]
+    previews = [message_preview(m) for m in routable]
     full = "\n".join(previews)
     if len(full) <= EMBED_BUDGET:
         return full
 
-    anchor_i = next((i for i, m in enumerate(messages) if m.role == "user"), 0)
+    anchor_i = next((i for i, m in enumerate(routable) if m.role == "user"), 0)
     anchor = previews[anchor_i][:ANCHOR_BUDGET]
 
     recent_start = max(anchor_i + 1, len(previews) - RECENT_MSGS)
