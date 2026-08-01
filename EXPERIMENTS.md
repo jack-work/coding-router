@@ -246,6 +246,36 @@ honest identity from here: **cost optimization at quality parity**, not quality 
 3. Standing gate (adopted): compute a held-out oracle BEFORE designing any router
    against any matrix.
 
+## EXP-015 results — live DeepSWE matrix: the published matrix is QUALITY-stale (2026-07-31)
+
+1,125/1,130 clean trials (1 zero-step dropped, 4 missing rewards), 10 arms x 113 tasks,
+1 trial/cell, **$3,576 total** (my $100-600 estimate was ~6x off: luna's 90x efficiency
+drift does NOT generalize — sol/opus/fable barely got cheaper; ledger updated: ~$3.7k
+of $20k API spent).
+
+**Live per-arm (f2p, $/task):** luna_low 0.369/$0.011; luna_medium 0.662/$0.031;
+**luna_max 0.687/$0.031 (COLLAPSED — matrix said 0.946)**; luna_high 0.912/$0.141;
+terra_max 0.839/$0.421; terra_high 0.930/$0.770; sol_xhigh 0.939/$4.68;
+sonnet5_high 0.899/$5.05; opus5_high 0.951/$6.33; fable5_xhigh 0.943/$14.36.
+
+**Findings.**
+1. The June matrix is not just economically stale — it is QUALITY-stale. luna_max fell
+   0.946 -> 0.687; effort ladders INVERTED live (luna high >> max; terra high >> max).
+   Any router (or static pick) built on June data that selects luna_max is broken today.
+2. The live static frontier is stark: luna_high 0.912 at $0.14 vs opus 0.951 at $6.33 —
+   a 45x cost gap for 3.9pp of quality. Where a deployment sits on that line is a real
+   product decision, and it moved in four weeks.
+3. Whether LIVE routing headroom exists (quality or cost, vs the live static frontier)
+   is UNANSWERABLE at 1 trial/cell — the 1-trial naive oracle (0.999) is pure winner's
+   curse and is reported only as a ceiling artifact. A >=2-trial pass on the relevant
+   arms is required for a held-out analysis (~$3-4k; decision pending).
+
+**Reframed value proposition.** Static-arm choice equals routing on a FROZEN matrix —
+but nothing is frozen: models drift in quality, cost, and effort-response monthly. The
+defensible product story after EXP-018 + EXP-015 is CONTINUOUS live benchmarking +
+adaptive arm selection (the router as drift-tracker), not "router beats statics on a
+snapshot." The Pier/Modal harness makes the refresh loop cheap and provenance-clean.
+
 ## EXP-011 — per-turn routing under injected difficulty (RUNNING, 2026-07-31)
 
 **Motivation.** EXP-010 found no per-turn advantage on LCB because easy episodes offer
