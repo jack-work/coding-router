@@ -528,3 +528,15 @@ held-out-oracle analysis preserved as canonical). Full experiment log mirrored t
 page "RL routing lane - experiment log (EXP-001-018)":
 https://app.notion.com/p/3af0f8b3f591812598a6efa3fb9e66fe
 Per-experiment updates continue there per the standing goal.
+
+## EXP-012 final table (2026-08-01)
+
+All 15 configs, seeds 0-5, vs static-select control (0.929/$3.28/6.8Mtok/847s):
+top = reward_lcb_b0.2 0.948/$2.64 (+0.019 [-0.011,+0.060]); best-balanced =
+grpo_dswe_b0.2 0.938/$1.43/3.0Mtok/490s (+0.009, 2.3x); cost-max = reward_dswe
+0.914-0.923/$1.26-1.29 (2.5-2.6x). 13/15 configs at/above control quality point.
+Static fable_5_xhigh (named baseline: 0.936/$13.07/7.2Mtok/1409s) dominated by every
+config on all four axes. Routers cut tokens 40-55% and latency 30-45% vs control.
+Full table mirrored to the Notion lane page. Fresh confirmations (5 winner configs,
+seeds 6-11) + EXP-013 slate-GRPO (8 held-out arms) launched; reward_lcb_b0.2 to be
+appended to the confirmation queue; SRB masking fix pending.
