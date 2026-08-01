@@ -787,3 +787,30 @@ Anchored slate 0.904 @ $1.11: the anchor does NOT compose with slate randomizati
 (both are regularizers; together they over-constrain). srb-source slate 0.937 @ $1.59
 is the best slate variant. Zero-shot unseen-arm pool (8 arms never in any training
 slate): 0.920 @ $1.61 — the new-model-as-data-update property holds.
+
+## EXP-023 confirmation — beta=0.35's "+0.011" was seed luck; pooled result stands
+
+Untouched seeds 12-17 vs control (0.936, $4.41): beta 0.25 -0.027, 0.35 -0.029,
+0.45 -0.029 — all identical, none reproducing the +0.011 seen on seeds 6-11. The peak
+was a seed artifact; within 0.1-0.6 the exact anchor value does not matter.
+(Same on the lcb source: b0.2 0.944/$2.62 vs b0.35 0.943/$2.30, 12 seeds.)
+
+**FINAL POOLED NUMBERS — the ones to quote:**
+
+| config | seeds | graded | $/task | dq vs control (CI) | cheaper |
+|---|---|---|---|---|---|
+| **anchored GRPO b0.35** | **18** | **0.932** | **1.46** | **-0.001 [-0.024, +0.026]** | **2.63x** |
+| anchored GRPO b0.2 | 12 | 0.935 | 1.41 | +0.004 [-0.024, +0.037] | 2.53x |
+| UNanchored GRPO | 12 | 0.909 | 1.21 | -0.022 [-0.044, +0.001] | 2.94x |
+
+Headline, over 18 independent repo-splits: **2.6x cheaper than the honest static-select
+control at statistical parity (-0.001)**. The anchor contributes ~+0.025 graded
+(anchored 0.932-0.935 vs unanchored 0.909) and is what converts a provably-worse
+cheap router into a parity one — this is the settled version of the dose-response
+finding; the specific beta within 0.1-0.6 is not identifiable at this n.
+
+**Methodology note.** This is the third time a peak selected on one seed batch failed
+to reproduce on the next (factor champion -0.003 -> -0.027; nca parity -> demoted;
+beta=0.35 +0.011 -> -0.029). The ~0.02 selection tax is not a correction to apply
+mentally, it is a hard rule: NO number gets promoted without a fresh-seed batch, and
+pooled-over-all-seeds is the only quotable form.
