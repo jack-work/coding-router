@@ -1,8 +1,8 @@
 # Router experiment journal
 
-Mirror of the Notion research journal (router lane). Notion MCP is configured
-(notion.com/mcp) but not connected in the authoring session — copy each entry to the
-Research page's router section when a connected session is available. One entry per
+In-repo source of truth for the RL routing lane; mirrored to Notion (parent "DeepSWE
+Router" page + child "RL routing lane — experiment log", page id
+3af0f8b3f591812598a6efa3fb9e66fe). Keep both in sync per-experiment. One entry per
 experiment; format: motivation / setup / result / verdict / next.
 
 All experiments share the evaluation protocol fixed by EXP-001 unless stated:
