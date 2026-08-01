@@ -6,6 +6,7 @@ dependencies = [
     "anthropic>=0.120.2",
     "fastapi>=0.141.1",
     "fire>=0.7.1",
+    "huggingface-hub>=0.30",
     # Local routing embeddings (Qwen3-Embedding-0.6B): MLX on Apple Silicon, torch
     # (CUDA when available) everywhere else. Routing never calls an embeddings API.
     "mlx-embeddings>=0.1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",

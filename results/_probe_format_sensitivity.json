@@ -1,0 +1,14 @@
+{
+ "n_dswe": 113,
+ "char_pctiles": {
+  "min": 472,
+  "p50": 1976,
+  "max": 5385
+ },
+ "between_task_cos": {
+  "raw": 0.3417264689778911,
+  "serve_turn0": 0.49379333917851215,
+  "serve_with_system": 0.7691225642032714
+ },
+ "pick_agreement_raw_vs_serve": 0.8230088495575221
+}

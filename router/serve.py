@@ -19,7 +19,6 @@ import queue
 import sys
 import threading
 import time
-import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable
@@ -614,50 +613,24 @@ def load_local_embedder(mlx_model: str = EMBED_MODEL_MLX,
 def ensure_artifact(artifact_dir: pathlib.Path) -> None:
     """Download the default router artifact from Hugging Face if not already on disk.
 
-    Follows the HF resolve redirect manually so the Authorization header (needed while
-    the repo is private; harmless once public) is never forwarded to the CDN, which
-    rejects requests carrying both a signed URL and an auth header.
+    Delegates to huggingface_hub (the same library the encoder download uses), which
+    handles redirects, tokens, and retries -- hand-rolled urllib redirect handling
+    broke the day HF started answering with relative Location headers.
 
     Args:
         artifact_dir: Directory the router.{json,npz} pair should live in.
-
-    Raises:
-        urllib.error.URLError: If the artifact can't be fetched (no network, bad token).
     """
     missing = [n for n in (ARTIFACT_JSON, ARTIFACT_NPZ) if not (artifact_dir / n).exists()]
     if not missing:
         return
+    from huggingface_hub import hf_hub_download  # deferred: startup-only
+
     load_env(ENV_FILE)  # HF_TOKEN, if the artifact repo is private
     artifact_dir.mkdir(parents=True, exist_ok=True)
     for name in missing:
-        url = f"https://huggingface.co/{HF_ARTIFACT_REPO}/resolve/main/{name}"
         logger.info(f"artifact: downloading {name} from {HF_ARTIFACT_REPO} ...")
-        req = urllib.request.Request(url, headers={"User-Agent": "coding-router"})
-        token = os.environ.get("HF_TOKEN")
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
-        opener = urllib.request.build_opener(_NoRedirect)
-        try:
-            resp = opener.open(req, timeout=60)
-        except urllib.error.HTTPError as e:
-            if e.code not in (301, 302, 303, 307, 308):
-                raise
-            resp = urllib.request.urlopen(  # noqa: S310 -- redirect target from HF itself
-                urllib.request.Request(e.headers["Location"],
-                                       headers={"User-Agent": "coding-router"}), timeout=60)
-        with resp:
-            data = resp.read()
-        tmp = artifact_dir / f"{name}.tmp"
-        tmp.write_bytes(data)
-        tmp.replace(artifact_dir / name)
-        logger.info(f"artifact: saved {artifact_dir / name} ({len(data):,} bytes)")
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Turn redirects into HTTPError so ensure_artifact can re-request without auth."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 -- trivial override
-        return None
+        hf_hub_download(HF_ARTIFACT_REPO, name, local_dir=artifact_dir)
+        logger.info(f"artifact: saved {artifact_dir / name}")
 
 
 SUMMARY_MODEL = "gpt-5.4-nano"

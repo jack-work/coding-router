@@ -14,3 +14,6 @@ __pycache__/
 *.egg-info/
 results/router.json
 results/router.npz
+results/encoder-mlx-4bit/
+results/encoder-fp16/
+results/.cache/
