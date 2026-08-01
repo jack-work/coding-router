@@ -1,11 +1,9 @@
 # coding-router
 
-One local endpoint that optimizes inference across big and small models, so you get more
-usage at the same cost. Point opencode (or any OpenAI-compatible client) at it. The routing decision is
-made by a small model running on your machine — your API keys are only used to call the
-model it picks. Routers are built in
-[world-model-optimizer](https://github.com/experientiallabs/world-model-optimizer) and
-hosted on [Hugging Face](https://huggingface.co/experiential-labs/coding-router).
+One local endpoint that optimizes coding requests between big and small models, so you get
+more usage at the same cost. Point opencode (or any OpenAI-compatible client) at it. The
+routing decision is made by a small model running on your machine. Routers are hosted on
+[Hugging Face](https://huggingface.co/experiential-labs/coding-router).
 
 ## Run
 
