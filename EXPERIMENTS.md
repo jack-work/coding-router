@@ -756,3 +756,34 @@ pool (ValueError: low >= high). Now adapts: lo = min(8, max(2, n_trainable//2)).
 Gated on Kion (external spend, not GPU): live closed-loop GRPO (~$1.5-3k) and the
 >=2-trial live pass (~$3-4k). After EXP-021 the 2-trial pass ranks first — single-trial
 live cells are why live routing works at the cheap end but not the quality end.
+
+## EXP-023 results — anchor dose-response settles the anchor question (2026-08-01)
+
+grpo/dswe, FRESH seeds 6-11, vs static-select control (0.933, $3.84/task):
+
+| beta | graded | $/task | dq vs control | cheaper |
+|---|---|---|---|---|
+| 0.0 | 0.901 | 1.13 | -0.032 [-0.060, -0.002] | 3.39x |
+| 0.1 | 0.930 | 1.33 | -0.003 [-0.036, +0.031] | 2.88x |
+| 0.2 | 0.931 | 1.38 | -0.002 [-0.027, +0.028] | 2.79x |
+| 0.35 | 0.944 | 1.36 | +0.011 [-0.013, +0.040] | 2.82x |
+| 0.6 | 0.936 | 1.88 | +0.003 [-0.020, +0.031] | 2.04x |
+
+**Monotone rise to a peak at 0.35, then decline — the shape of a real regularization
+parameter.** This settles the anchor question affirmatively; the earlier evidence was a
+95.5%-positive bootstrap (CI marginally spanning zero), which a dose-response curve of
+this shape is much harder to produce by chance. Unanchored is the only setting provably
+worse than control.
+
+**Selection discipline.** beta=0.35 looks like a new champion (0.944 at 2.82x, above
+control on BOTH axes) but it was chosen by looking at seeds 6-11, which are therefore
+no longer fresh for that choice. Confirmation launched on untouched seeds 12-17 for
+beta in {0.25, 0.35, 0.45}; also testing whether the 0.35 optimum transfers to the srb
+and lcb training sources (12 seeds each).
+
+**Slate randomization (v6, 8 held-out arms).** full-pool 0.908 @ $1.12 (seeds 0-5),
+0.905 @ $1.07 fresh (6-11) — the ~1pp in-pool robustness tax reproduces on fresh seeds.
+Anchored slate 0.904 @ $1.11: the anchor does NOT compose with slate randomization
+(both are regularizers; together they over-constrain). srb-source slate 0.937 @ $1.59
+is the best slate variant. Zero-shot unseen-arm pool (8 arms never in any training
+slate): 0.920 @ $1.61 — the new-model-as-data-update property holds.

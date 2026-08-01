@@ -134,7 +134,7 @@ def _source_cv(x: np.ndarray, y: np.ndarray, groups: list[str]) -> dict[str, Any
 
 
 def fit(output: pathlib.Path, *, easy_quantile: float = 0.55,
-        hard_quantile: float = 0.05) -> dict[str, Any]:
+        hard_quantile: float = 0.05, use_strong: bool = True) -> dict[str, Any]:
     if not 0.0 < hard_quantile < easy_quantile < 1.0:
         raise ValueError("require 0 < hard_quantile < easy_quantile < 1")
     embeddings = _load_embeddings()
@@ -166,7 +166,7 @@ def fit(output: pathlib.Path, *, easy_quantile: float = 0.55,
         task_id = key.split(":", 1)[1]
         if value >= easy_cut:
             tier, model = "easy", CHEAP
-        elif value <= hard_cut:
+        elif value <= hard_cut and use_strong:
             tier, model = "hard", STRONG
         else:
             tier, model = "normal", BASELINE
@@ -191,13 +191,14 @@ def fit(output: pathlib.Path, *, easy_quantile: float = 0.55,
         "knn_k": k,
         "target_query_count": len(task_ids),
         "route_quantiles": {"easy": easy_quantile, "hard": hard_quantile},
+        "strong_arm_enabled": use_strong,
         "route_cutoffs": {"easy_source_ease": easy_cut, "hard_source_ease": hard_cut},
         "task_routes": routes,
         "task_route_metadata": route_meta,
-        "escalation_order": [CHEAP, BASELINE, STRONG],
+        "escalation_order": [CHEAP, BASELINE, STRONG] if use_strong else [CHEAP, BASELINE],
         "escalate_on_failure": True,
         "default_model": BASELINE,
-        "pool": POOL,
+        "pool": POOL if use_strong else POOL[:2],
         "profile_bins": [0.0],
         "profile_models": [BASELINE, BASELINE],
         "fit_source_text_sha256": __import__("hashlib").sha256(
@@ -214,9 +215,11 @@ def main() -> None:
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--easy-quantile", type=float, default=0.55)
     parser.add_argument("--hard-quantile", type=float, default=0.05)
+    parser.add_argument("--no-strong", action="store_true",
+                        help="fit a two-rung Luna-only policy; keep the strong tier out of routing")
     args = parser.parse_args()
     artifact = fit(args.output, easy_quantile=args.easy_quantile,
-                   hard_quantile=args.hard_quantile)
+                   hard_quantile=args.hard_quantile, use_strong=not args.no_strong)
     counts: dict[str, int] = {}
     for model in artifact["task_routes"].values():
         counts[model] = counts.get(model, 0) + 1
