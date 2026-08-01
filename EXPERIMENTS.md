@@ -519,6 +519,45 @@ real quality cost (CI excludes 0) and does not dominate the factor-head champion
 champion unchanged. If more labelled tasks ever arrive, revisit (the slow-overfit
 trend suggests 8B LoRA scales with n better than 0.6B).
 
+## EXP-019 — source-transfer per-turn routing on all DeepSWE (2026-07-31)
+
+**Motivation.** DeepSWE must be evaluation-only. Fit the router on a separate,
+correlated coding-trace dataset, then test cache-aware per-turn routing on every
+DeepSWE v1.1 task. The target is to beat a matched always-Luna-max baseline while
+clearing the 2% savings gate.
+
+**Setup.** Fit on 1,424 graded coding trajectories from
+`nebius/SWE-rebench free graded coding trajectories`, with 5-fold grouping by source
+repository. Frozen `te3-large` embeddings, kNN `k=64`, and two arms only:
+`gpt-5.6-luna@low` and `gpt-5.6-luna@max`. DeepSWE outcomes and costs were not used
+for fitting. Evaluate all 113 DeepSWE tasks online with cache/prefill-aware per-turn
+routing on Azure, using the same direct evaluator for a fresh always-Luna-max control.
+
+**Result.**
+
+| system | graded quality | cost | $/task | comparison |
+|---|---:|---:|---:|---|
+| source-trained per-turn router | 0.8672 (112/113 scored; conservative all-task lower bound 0.8595) | $120.80 | $1.069 | 4.93% cheaper than Luna max |
+| always Luna max, matched live control | 0.8126 (112/113 scored; range 0.8054-0.8142) | $127.06 | $1.124 | baseline |
+| always Opus max, published DeepSWE matrix | 0.9429 | $1,355.46 | $11.995 | 91.1% more expensive than router |
+
+The router won 30 tasks, tied 60, and lost 22 among the 112 paired scored tasks.
+It used 117 low-effort turns and 6,194 max-effort turns across 6,311 turns, with 50
+switches. The `pwntools-tube-multiplexing` verifier timed out in both live runs and
+is reported as unscored, not dropped. A fresh full Opus run was not launched because
+the published all-task cost already exceeds the $1,000 cap.
+
+**Verdict.** PASS for the stated gates in this matched live run: the source-trained
+per-turn router beats the fresh Luna-max control by 5.46 graded points on scored
+tasks, remains ahead by at least 4.53 points under the conservative missing-task
+bound, and saves 4.93% cost. It is not Opus-quality: it is 7.57 graded points below
+the published Opus-max matrix result, while costing 91.1% less. DeepSWE remains
+evaluation-only.
+
+Artifacts: `results/source_transfer_perturn_luna_only_20260731.json`,
+`/private/tmp/deepswe-source-transfer-luna-only-full-20260801/summary.json`, and
+`/private/tmp/deepswe-luna-max-direct-full-20260801/summary.json`.
+
 ---
 
 ## Notion mirror (2026-07-31)
