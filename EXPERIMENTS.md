@@ -814,3 +814,24 @@ to reproduce on the next (factor champion -0.003 -> -0.027; nca parity -> demote
 beta=0.35 +0.011 -> -0.029). The ~0.02 selection tax is not a correction to apply
 mentally, it is a hard rule: NO number gets promoted without a fresh-seed batch, and
 pooled-over-all-seeds is the only quotable form.
+
+## EXP-024 — continuous queue runner (2026-08-01)
+
+Replaces fire-and-refill (which left idle gaps between batches) with a self-sustaining
+runner on box 6: `/nvme/work/router-rl/queue_runner.sh` in tmux session `runner`. It
+keeps 3 jobs per GPU alive at all times, popping the next config from `queue.txt` the
+moment a slot frees, and appends LAUNCH/DONE lines to `queue_done.txt`. A Monitor tails
+that file so each completed config emits an event -> aggregate -> journal + Notion entry
+per experiment rather than in bulk.
+
+**Queued grid (32 configs, all free/GPU-only, each = one 6-seed experiment):**
+1. anchor(0.35) x {grpo, reward} x {dswe, srb, lcb} x both fresh seed batches (6-11 and
+   12-17) — every cell ships with its own confirmation batch by construction, so the
+   selection tax cannot bite again.
+2. v4 algorithm family (rank, nca) UNDER the anchor — both were only ever run
+   unanchored, and the anchor is now known to be worth ~+0.025.
+3. slate randomization x {dswe(8 held-out), srb(1 held-out)} x {0, 0.35} on fresh
+   batches — does arm-set-invariant training compose with the anchor at the settled
+   value (it did not at 0.2).
+4. factor head x rank {4, 8, 16} x anchor {0, 0.1} on seeds 12-17 — the CPU-cheap
+   parametric baseline never got an anchored variant.
