@@ -701,3 +701,34 @@ config provably worse than control on fresh seeds.
 Note the srb/lcb/frozen configs land at ~1.2x here vs 1.8x on selection seeds — their
 lam/checkpoint choices transferred to a more conservative operating point. Anchored
 GRPO is the config whose cost advantage held up.
+
+## EXP-022 — prefix depth, re-tested with the DEPLOYED policy class (2026-08-01)
+
+EXP-017's depth negative used linear probes — the instrument class that produced a
+false negative in EXP-020. Re-ran with kNN over prefix embeddings (one embedding per
+task, averaged over that task's runs), each depth against its own shuffled-INPUT
+control, lam=0.05, 15 shuffles, 5-fold repo-grouped.
+
+| depth | real | shuffled twin | signal |
+|---|---|---|---|
+| 0% | 0.924 @ $0.33 | 0.919 | +0.005 +/- 0.006 |
+| 20% | 0.928 @ $0.35 | 0.921 | +0.007 +/- 0.009 |
+| 40% | 0.931 @ $0.35 | 0.919 | +0.012 +/- 0.012 |
+| 60% | 0.930 @ $0.35 | 0.920 | +0.011 +/- 0.009 |
+| 80% | 0.931 @ $0.35 | 0.920 | +0.011 +/- 0.011 |
+
+**Correction to EXP-017.** "Flat at every depth" was instrument-limited. With kNN the
+signal roughly doubles from task-only (+0.005) to mid-episode (+0.011) and absolute
+quality rises +0.007 at matched cost. Trajectory information EXISTS.
+
+**It still does not pay, on economics not statistics.** (1) All bins sit within ~1 SD
+of each other. (2) The measurement GIVES the router the prefix for free; deployment
+must buy it by running an arm 40-80% of the way through the episode, then either switch
+(re-prefill + discarded work) or not. Paying ~40-80% of an episode for ~+0.007 graded
+is not a trade that closes. This independently reproduces the cost-side verdict of the
+two live LCB A/Bs (EXP-010, EXP-011): per-turn == turn0 quality at higher cost.
+
+**Per-turn verdict (final, three methods agreeing).** Live A/B, injected-difficulty
+A/B, and now an information analysis with the correct instrument: route ONCE from the
+task text. Reopen only if switch cost collapses (same-provider, cache-preserving
+handoff) or on a domain with far larger arm spread than DeepSWE.
