@@ -1,14 +1,11 @@
 # coding-router
 
-Routes every coding-agent request to the cheapest OpenAI/Anthropic model likely to solve it,
-via kNN over measured outcomes. One local OpenAI-compatible endpoint; point opencode (or any
-openai-compatible client) at it. Routing itself runs fully locally — a small embedding model
-(Qwen3-0.6B, MLX on Apple Silicon / CUDA elsewhere) plus a kNN lookup; your API keys are only
-used to dispatch to the model it picks. This repo is the product only — the research lab that
-builds and validates routing artifacts lives in
-[world-model-optimizer](https://github.com/experientiallabs/world-model-optimizer)
-(`wmo optimize route`), and the default artifact lives on
-[Hugging Face](https://huggingface.co/experiential-labs/coding-router).
+One local endpoint that sends each coding-agent request to the cheapest model likely to
+solve it. Point opencode (or any OpenAI-compatible client) at it. The routing decision is
+made by a small model running on your machine — your API keys are only used to call the
+model it picks. Routers are built in
+[world-model-optimizer](https://github.com/experientiallabs/world-model-optimizer) and
+hosted on [Hugging Face](https://huggingface.co/experiential-labs/coding-router).
 
 ## Run
 
