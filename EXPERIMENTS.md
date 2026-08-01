@@ -540,3 +540,27 @@ config on all four axes. Routers cut tokens 40-55% and latency 30-45% vs control
 Full table mirrored to the Notion lane page. Fresh confirmations (5 winner configs,
 seeds 6-11) + EXP-013 slate-GRPO (8 held-out arms) launched; reward_lcb_b0.2 to be
 appended to the confirmation queue; SRB masking fix pending.
+
+## EXP-017 — trajectory-prefix information test (2026-08-01) — NEGATIVE, decisive
+
+**Question (Kion's ill-posedness hypothesis).** Task difficulty may depend on early
+trajectory state, not the task text ("run airbnb is easier in a folder containing
+airbnb"). If so, routing AFTER K reconnaissance steps should predict outcomes better.
+
+**Setup.** 1,126 live DeepSWE trajectories from EXP-015 (median 42 steps). Build text
+prefixes K=0..5 (task text; task + first K assistant actions/outputs, system prompt and
+boilerplate stripped — also the serve-shaped input per the production degeneracy note),
+embed with Qwen3-Embedding-0.6B (max_seq 4096), pooled ridge with arm one-hots,
+leave-one-REPO-out. Metric: out-of-fold R^2 predicting final f2p. $0 (data already paid).
+
+**Result.** K=0 +0.2038 | K=1 +0.2010 | K=2 +0.2004 | K=3 +0.1986 | K=5 +0.1859.
+Flat then declining: early steps carry no incremental outcome signal and eventually
+dilute the task-text signal.
+
+**Verdict.** Route-after-reconnaissance is NOT justified on DeepSWE; per-task routing is
+the correct decision object. Explains the EXP-010/011 per-turn nulls information-
+theoretically (nothing to learn by waiting) and matches the literature note that failure
+evidence appears at 59-84% of trajectory depth. Flagship live run = per-task closed-loop
+trainer, no watch-then-route detour. Caveat: pooled-linear probe of prefix embeddings;
+engineered prefix features (explicit test-pass/error state) untested, but the monotone
+decline is a strong prior against.
