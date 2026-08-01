@@ -557,7 +557,16 @@ leave-one-REPO-out. Metric: out-of-fold R^2 predicting final f2p. $0 (data alrea
 Flat then declining: early steps carry no incremental outcome signal and eventually
 dilute the task-text signal.
 
-**Verdict.** Route-after-reconnaissance is NOT justified on DeepSWE; per-task routing is
+**SCOPE CORRECTION (2026-08-01).** This result covers the first ~5 steps ONLY. A
+follow-up depth-bin run (EXP-017b) was invalid: prefixes were head-truncated at 12,000
+chars while trajectories are a median 911,000 chars (100% exceed the cap), so all bins
+past ~20% embedded the identical opening fragment — the flat curve there was an
+artifact, not evidence. EXP-017c re-runs it conditioning on the most-recent 10k-char
+window at each depth (what a router deciding there would see); deep-trajectory signal
+is UNRESOLVED until it lands.
+
+**Verdict (early steps only).** Route-after-reconnaissance is NOT justified from the
+first ~5 steps on DeepSWE; per-task routing is
 the correct decision object. Explains the EXP-010/011 per-turn nulls information-
 theoretically (nothing to learn by waiting) and matches the literature note that failure
 evidence appears at 59-84% of trajectory depth. Flagship live run = per-task closed-loop
