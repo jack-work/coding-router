@@ -1,7 +1,7 @@
 # coding-router
 
-One local endpoint that sends each coding-agent request to the cheapest model likely to
-solve it. Point opencode (or any OpenAI-compatible client) at it. The routing decision is
+One local endpoint that optimizes inference across big and small models, so you get more
+usage at the same cost. Point opencode (or any OpenAI-compatible client) at it. The routing decision is
 made by a small model running on your machine — your API keys are only used to call the
 model it picks. Routers are built in
 [world-model-optimizer](https://github.com/experientiallabs/world-model-optimizer) and
