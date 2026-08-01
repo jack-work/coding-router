@@ -672,3 +672,32 @@ linear — neighbourhood structure, not a direction in embedding space.
 **Methodology rule adopted:** a negative result about signal must be demonstrated with
 the SAME model class that would exploit it, and against a shuffled-input control of the
 real system — never with a linear proxy alone.
+
+## EXP-012 fresh-seed confirmations + anchor verdict (2026-08-01)
+
+Seeds 6-11, never used for any selection. Control = static-select margin 0.01:
+0.933 graded, $3.84/task.
+
+| config | graded | $/task | dq vs control (CI) | cheaper |
+|---|---|---|---|---|
+| **grpo_dswe anchored b0.2** | **0.931** | **1.38** | **-0.002 [-0.027, +0.029]** | **2.79x** |
+| grpo_dswe unanchored | 0.901 | 1.13 | -0.032 [-0.060, -0.002] | 3.39x |
+| frozen temps | 0.942 | 3.18 | +0.010 [-0.015, +0.040] | 1.21x |
+| grpo srb | 0.939 | 3.20 | +0.007 [-0.017, +0.037] | 1.20x |
+| reward srb | 0.938 | 3.18 | +0.005 [-0.016, +0.031] | 1.21x |
+| reward lcb anchored | 0.939 | 2.61 | +0.007 [-0.018, +0.037] | 1.47x |
+
+**HEADLINE (fresh-confirmed): anchored GRPO gives 2.79x cost reduction at statistical
+parity** (-0.002, CI spans zero) after paying the selection tax (+0.009 -> -0.002, i.e.
+0.011, consistent with the ~0.02 estimate).
+
+**Anchor verdict.** Pooled 12 seeds, paired on identical cells: anchored minus
+unanchored = +0.0258 graded, 95% CI [-0.0037, +0.0621], 95.5% of repo-clustered
+bootstrap draws positive, at +$0.197/task. Two independent batches agree (+0.021 on
+0-5, +0.030 on 6-11) and the mechanism is measured (anchor flattens the holdout-decay
+curve). Verdict: PROBABLY REAL, not conclusive at 95%. Unanchored GRPO is the only
+config provably worse than control on fresh seeds.
+
+Note the srb/lcb/frozen configs land at ~1.2x here vs 1.8x on selection seeds — their
+lam/checkpoint choices transferred to a more conservative operating point. Anchored
+GRPO is the config whose cost advantage held up.
