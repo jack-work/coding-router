@@ -196,27 +196,57 @@ def cmd_train(args):
 
 
 def cmd_eval(args):
-    """Trained policy (greedy) vs turn0-frozen and static controls, held-out repos."""
+    """Trained policy vs controls on held-out repos, all run in the SAME batch so the
+    comparison is contemporaneous (live arms drift week to week).
+
+    Variants are selected by episode-id convention, interpreted by the proxy:
+      greedy        trained per-turn policy, argmax every turn
+      frozen        same policy, first choice locked for the episode (per-task routing)
+      static-<arm>  one fixed arm for the whole episode
+    """
     _, eval_tasks = split_tasks()
     tasks = eval_tasks[: args.tasks]
-    print(f"eval on {len(tasks)} held-out tasks", flush=True)
-    variants = {"perturn": {"explore": 0.0, "freeze": False},
-                "turn0": {"explore": 0.0, "freeze": True}}
-    results = {}
-    for name, cfg in variants.items():
-        import modal
-        modal.Function.from_name("coding-router-proxy", "put_policy")  # weights already set
-        jobs = [(t, f"{t}__ev{args.tag}{name}") for t in tasks]
-        with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
-            recs = [f.result() for f in
-                    cf.as_completed([ex.submit(run_episode, t, ep) for t, ep in jobs])]
-        dec = fetch_decisions(prefix="")
-        ok = [r for r in recs if r["f2p"] is not None and dec.get(r["ep"])]
-        g = float(np.mean([r["f2p"] for r in ok]))
-        c = float(np.mean([episode_cost(dec[r["ep"]]) for r in ok]))
-        results[name] = {"n": len(ok), "f2p": g, "cost": c}
-        print(f"  {name:10s} n={len(ok)} f2p {g:.3f}  ${c:.2f}/task", flush=True)
-    (OUT / f"eval_{args.tag}.json").write_text(json.dumps(results, indent=1))
+    variants = ["greedy", "frozen", "static-luna_high", "static-terra_high"]
+    print(f"eval on {len(tasks)} held-out tasks x {len(variants)} variants", flush=True)
+
+    jobs = [(t, f"{t}__ev{args.tag}__{v}") for v in variants for t in tasks]
+    recs = []
+    with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(run_episode, t, ep): (t, ep) for t, ep in jobs}
+        for f in cf.as_completed(futs):
+            try:
+                recs.append(f.result())
+            except Exception as e:  # noqa: BLE001 — infra fault = missing data
+                print(f"  DROPPED {futs[f][1]}: {str(e)[:100]}", flush=True)
+    dec = fetch_decisions(prefix="")
+
+    out = {}
+    for v in variants:
+        rs = [r for r in recs if r["ep"].endswith(f"__{v}")
+              and r["f2p"] is not None and dec.get(r["ep"])]
+        if not rs:
+            print(f"  {v:20s} no usable episodes")
+            continue
+        g = float(np.mean([r["f2p"] for r in rs]))
+        c = float(np.mean([episode_cost(dec[r["ep"]]) for r in rs]))
+        sw = float(np.mean([sum(1 for i in range(1, len(dec[r["ep"]]))
+                                if dec[r["ep"]][i]["arm"] != dec[r["ep"]][i - 1]["arm"])
+                            for r in rs]))
+        out[v] = {"n": len(rs), "f2p": g, "cost": c, "switches": sw,
+                  "per_task": {r["task"]: r["f2p"] for r in rs}}
+        print(f"  {v:20s} n={len(rs):3d}  f2p {g:.3f}  ${c:5.2f}/task  {sw:4.1f} switches/ep",
+              flush=True)
+
+    # paired comparison on the tasks every variant completed
+    common = set.intersection(*[set(out[v]["per_task"]) for v in out]) if out else set()
+    if common and "greedy" in out:
+        print(f"\n  paired on {len(common)} common tasks (greedy - variant):")
+        for v in out:
+            if v == "greedy":
+                continue
+            d = np.mean([out["greedy"]["per_task"][t] - out[v]["per_task"][t] for t in common])
+            print(f"    vs {v:20s} graded {d:+.3f}")
+    (OUT / f"eval_{args.tag}.json").write_text(json.dumps(out, indent=1))
 
 
 if __name__ == "__main__":

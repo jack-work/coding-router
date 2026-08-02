@@ -122,10 +122,31 @@ def _decide(messages, ep):
                     pass
     W, temp, explore = load_policy()
     x = np.array(features(turn, cost_so_far, last_ok, err_hits, test_pass, prev_arm, n_msgs))
+
+    # Eval-control conventions carried in the episode id, so every variant runs through
+    # the identical code path (only the arm-choice rule differs):
+    #   ...__static-<arm_id>  force one arm for the whole episode (static baseline)
+    #   ...__frozen           greedy at turn 0, then reuse that arm (per-task routing)
+    #   ...__greedy           argmax every turn, no exploration (trained per-turn policy)
+    forced = None
+    for tok in ep.split("__"):
+        if tok.startswith("static-"):
+            want = tok[len("static-"):]
+            forced = next((i for i, A in enumerate(ARMS) if A["id"] == want), None)
+        elif tok == "frozen" and prev_arm >= 0:
+            forced = prev_arm
+    greedy = forced is None and any(t in ("greedy", "frozen") for t in ep.split("__"))
+
     z = np.array(W) @ x
     p = np.exp((z - z.max()) / max(temp, 1e-3))
-    p = (1 - explore) * p / p.sum() + explore / N_ARMS
-    a = int(np.random.choice(N_ARMS, p=p))
+    p = p / p.sum()
+    if forced is not None:
+        a = int(forced)
+    elif greedy:
+        a = int(np.argmax(z))
+    else:
+        p = (1 - explore) * p + explore / N_ARMS
+        a = int(np.random.choice(N_ARMS, p=p))
     return a, x, p, turn, ep_path
 
 

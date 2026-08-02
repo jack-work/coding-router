@@ -875,6 +875,26 @@ per experiment rather than in bulk.
 4. factor head x rank {4, 8, 16} x anchor {0, 0.1} on seeds 12-17 — the CPU-cheap
    parametric baseline never got an anchored variant.
 
+## EXP-026 — Opus-quality gate (2026-08-01) — STOPPED ON BUDGET
+
+**Requirement.** Move the live per-turn router from beating Luna max to within 1%
+of the published Opus-max quality, approximately 0.933 or higher.
+
+**Policy tested.** Source-only quality-first fit on the same 1,424 SWE-rebench traces:
+79 source-predicted tasks routed to Opus max and 34 safest tasks routed to Luna max.
+DeepSWE outcomes and costs were not used for fitting. The full 113-task run was
+launched on Azure with cache-aware per-turn routing.
+
+**Finding.** The first Opus-routed 60-turn task cost $25.32. After 9 partial task
+trajectories, spend was $33.93, and the run was stopped before it could report a valid
+quality metric. Continuing the 79-task Opus mix would likely exceed the $1,000 cap,
+so no quality claim is made from the partial run.
+
+**Verdict.** The current Luna-only router at 0.867 is not within 1% of Opus. A valid
+all-113-task quality-gated run needs a higher approved budget or a materially cheaper
+Opus evaluation path. The source-only quality-first policy is ready to relaunch once
+that budget decision is made.
+
 ## EXP-025 — closed-loop per-turn router on live DeepSWE (2026-08-02)
 
 Primary objective per Kion. The router picks a model for EVERY agent turn inside the
