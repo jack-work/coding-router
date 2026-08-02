@@ -874,3 +874,42 @@ per experiment rather than in bulk.
    value (it did not at 0.2).
 4. factor head x rank {4, 8, 16} x anchor {0, 0.1} on seeds 12-17 — the CPU-cheap
    parametric baseline never got an anchored variant.
+
+## EXP-025 — closed-loop per-turn router on live DeepSWE (2026-08-02)
+
+Primary objective per Kion. The router picks a model for EVERY agent turn inside the
+official Pier/mini-swe-agent scaffold on Modal; episode reward from the verifier + real
+billed tokens; policy trains on its own rollouts. No offline matrix in the loop.
+
+**Infrastructure.** `rl/router_proxy.py` = Modal app `coding-router-proxy`, an
+OpenAI-compatible endpoint. Per call: rebuild state (turn index, cost so far, struggle
+signals from recent tool output, previous arm) -> linear policy w/ exploration floor ->
+forward to real provider -> log (state, action, probs, usage). Pier auto-allowlists the
+host from OPENAI_API_BASE, so the integration is supported, not a hack; episode id
+travels in the URL path since the agent cannot send custom headers.
+`rl/perturn_live.py` (box 6) = the training driver.
+
+**Two bugs found by running it live, both now fixed.**
+1. mini-swe-agent DOES send function tools, and the gpt-5.6 family rejects tools +
+   reasoning_effort on /v1/chat/completions ("use /v1/responses"). Before this was
+   found, all 45 OpenAI calls failed and only the Anthropic arm worked - the episode
+   looked like it ran (12 steps) but was really always-opus with 45 retries. Fix:
+   Responses API + OpenAI-only phase-1 pool (Anthropic needs a Responses<->Messages
+   translation, phase 2).
+2. Stacked FastAPI route decorators silently did not register; replaced with a
+   catch-all route tolerant of any base-URL shape litellm builds.
+
+**First working episode:** 34 routed turns across 5 arms, task SOLVED (f2p 1.0).
+**First training iteration (4 episodes):** f2p 1.000, $3.93/ep, reward +0.803, 79
+routed turns spanning all 5 arms.
+
+**Immediate finding - the switch cost is the whole game.** $3.93/episode against static
+luna_high at $0.141 = 28x more expensive. Cache is per-model, so a near-random policy
+that changes arm almost every turn forces a cold re-prefill of the full transcript every
+time. Quality is fine; the economics are not, until the policy learns stickiness. The
+prev-arm feature exists precisely for this (it was the largest lever on LCB). Whether it
+can learn to switch only when switching pays IS the per-turn question.
+
+**Run launched:** 8 iterations x 10 tasks x 2 rollouts, lam=0.05, explore 0.12,
+repo-split train/eval, $2.5k cap. Pre-registered eval: greedy policy vs turn0-frozen
+and static controls on held-out repos.

@@ -134,7 +134,8 @@ def _source_cv(x: np.ndarray, y: np.ndarray, groups: list[str]) -> dict[str, Any
 
 
 def fit(output: pathlib.Path, *, easy_quantile: float = 0.55,
-        hard_quantile: float = 0.05, use_strong: bool = True) -> dict[str, Any]:
+        hard_quantile: float = 0.05, use_strong: bool = True,
+        quality_first: bool = False) -> dict[str, Any]:
     if not 0.0 < hard_quantile < easy_quantile < 1.0:
         raise ValueError("require 0 < hard_quantile < easy_quantile < 1")
     embeddings = _load_embeddings()
@@ -164,7 +165,14 @@ def fit(output: pathlib.Path, *, easy_quantile: float = 0.55,
     route_meta: dict[str, dict[str, Any]] = {}
     for key, value, sim in zip(target_ids, target_ease, nearest):
         task_id = key.split(":", 1)[1]
-        if value >= easy_cut:
+        if quality_first:
+            # Keep only the source-predicted easiest fraction on Luna max. All
+            # remaining tasks use Opus max. This branch reads no DeepSWE labels.
+            if value >= easy_cut:
+                tier, model = "quality-safe", BASELINE
+            else:
+                tier, model = "quality-default", STRONG
+        elif value >= easy_cut:
             tier, model = "easy", CHEAP
         elif value <= hard_cut and use_strong:
             tier, model = "hard", STRONG
@@ -191,6 +199,7 @@ def fit(output: pathlib.Path, *, easy_quantile: float = 0.55,
         "knn_k": k,
         "target_query_count": len(task_ids),
         "route_quantiles": {"easy": easy_quantile, "hard": hard_quantile},
+        "policy_objective": "quality-first source transfer" if quality_first else "cost-quality source transfer",
         "strong_arm_enabled": use_strong,
         "route_cutoffs": {"easy_source_ease": easy_cut, "hard_source_ease": hard_cut},
         "task_routes": routes,
@@ -217,9 +226,20 @@ def main() -> None:
     parser.add_argument("--hard-quantile", type=float, default=0.05)
     parser.add_argument("--no-strong", action="store_true",
                         help="fit a two-rung Luna-only policy; keep the strong tier out of routing")
+    parser.add_argument("--quality-first", action="store_true",
+                        help="route source-predicted non-easy tasks to Opus max and easy tasks to Luna max")
+    parser.add_argument("--quality-easy-quantile", type=float, default=None,
+                        help="fraction of source-predicted easiest tasks kept on Luna max in quality-first mode")
     args = parser.parse_args()
+    if args.quality_first and args.no_strong:
+        raise SystemExit("--quality-first requires the Opus strong arm")
+    if args.quality_first and args.quality_easy_quantile is not None:
+        if not 0.0 < args.quality_easy_quantile < 1.0:
+            raise SystemExit("--quality-easy-quantile must be between 0 and 1")
+        args.easy_quantile = args.quality_easy_quantile
     artifact = fit(args.output, easy_quantile=args.easy_quantile,
-                   hard_quantile=args.hard_quantile, use_strong=not args.no_strong)
+                   hard_quantile=args.hard_quantile, use_strong=not args.no_strong,
+                   quality_first=args.quality_first)
     counts: dict[str, int] = {}
     for model in artifact["task_routes"].values():
         counts[model] = counts.get(model, 0) + 1

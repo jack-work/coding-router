@@ -37,16 +37,21 @@ image = (modal.Image.debian_slim(python_version="3.12")
 # Arm pool = the live-benchmarked frontier (EXP-015). price is $/task observed live,
 # used only for the reward; the policy sees it as a feature.
 ARMS = [
+    # Phase 1: OpenAI-only so every arm speaks the Responses API natively. gpt-5.6 models
+    # REJECT function tools + reasoning_effort on /v1/chat/completions (they require
+    # /v1/responses), and mini-swe-agent does send tools. Anthropic arms need a
+    # Responses<->Messages translation and land in phase 2.
+    # price/f2p are the live EXP-015 measurements.
     {"id": "luna_medium", "provider": "openai", "model": "gpt-5.6-luna", "effort": "medium",
      "price": 0.031},
     {"id": "luna_high", "provider": "openai", "model": "gpt-5.6-luna", "effort": "high",
      "price": 0.141},
     {"id": "terra_high", "provider": "openai", "model": "gpt-5.6-terra", "effort": "high",
      "price": 0.770},
+    {"id": "terra_max", "provider": "openai", "model": "gpt-5.6-terra", "effort": "max",
+     "price": 0.421},
     {"id": "sol_xhigh", "provider": "openai", "model": "gpt-5.6-sol", "effort": "xhigh",
      "price": 4.681},
-    {"id": "opus5_high", "provider": "anthropic", "model": "claude-opus-5", "effort": "high",
-     "price": 6.331},
 ]
 N_ARMS = len(ARMS)
 FEATS = 8  # see features()
@@ -78,7 +83,7 @@ def load_policy():
     # cold start: prefer the cheap-but-strong arm, mild preference gradient by price
     W = [[0.0] * FEATS for _ in range(N_ARMS)]
     for a in range(N_ARMS):
-        W[a][0] = 1.0 if ARMS[a]["id"] == "luna_high" else 0.0
+        W[a][0] = 1.0 if ARMS[a]["id"] == "luna_high" else 0.0  # cheap-strong default
     return W, 1.0, 0.15
 
 
@@ -124,13 +129,14 @@ def _decide(messages, ep):
     return a, x, p, turn, ep_path
 
 
-def _log(ep_path, turn, a, x, p, usage, t0):
+def _log(ep_path, turn, a, x, p, usage, t0, err=None):
     cost = (usage.get("prompt_tokens", usage.get("input_tokens", 0)) * 1e-6 * 2.0
             + usage.get("completion_tokens", usage.get("output_tokens", 0)) * 1e-6 * 10.0)
     with open(ep_path, "a") as fh:
         fh.write(json.dumps({"turn": turn, "arm": a, "arm_id": ARMS[a]["id"],
                              "x": list(x), "p": list(p), "cost": cost,
-                             "usage": usage, "wall": round(time.time() - t0, 2)}) + "\n")
+                             "usage": usage, "err": err,
+                             "wall": round(time.time() - t0, 2)}) + "\n")
     vol.commit()
 
 
@@ -169,9 +175,14 @@ def router():
         async with httpx.AsyncClient(timeout=1800.0) as cl:
             r = await cl.post(url, json=body, headers=headers)
             try:
-                return r.json()
+                j = r.json()
             except Exception:
-                return {"error": {"message": r.text[:800], "status": r.status_code}}
+                j = {"error": {"message": r.text[:800], "status": r.status_code}}
+            if r.status_code >= 400 or "error" in j:
+                # surface upstream failures instead of returning an unparseable body
+                j.setdefault("_status", r.status_code)
+                j["_sent_keys"] = sorted(body.keys())
+            return j
 
     @web.post("/{full_path:path}")
     async def any_post(request: Request, full_path: str):
@@ -207,7 +218,10 @@ def router():
             headers = {"x-api-key": os.environ["ANTHROPIC_API_KEY"],
                        "anthropic-version": "2023-06-01"}
         out = await _forward(url, headers, body)
-        _log(ep_path, turn, a, x, p_, out.get("usage", {}) or {}, t0)
+        err = None
+        if not out.get("usage"):
+            err = json.dumps(out.get("error", out))[:400]
+        _log(ep_path, turn, a, x, p_, out.get("usage", {}) or {}, t0, err)
         return out
 
     return web
