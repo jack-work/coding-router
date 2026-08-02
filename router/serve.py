@@ -532,7 +532,16 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
 
 
 def message_preview(m: ChatMessage) -> str:
-    """Render one message as `[role] json-snippet`, for the routing-embedding trajectory."""
+    """Render one message for the routing-embedding trajectory.
+
+    User content renders BARE: the evidence bank's rows are embedded from raw task
+    texts, and any wrapper ("[user] \"...\"" was measured) inflates short-text
+    similarity across the board -- short non-coding asks stopped abstaining because
+    they matched the wrapper, not the task. Other roles keep a role tag so multi-turn
+    structure survives.
+    """
+    if m.role == "user" and m.content:
+        return m.content[:2000]
     payload = m.content or ([tc.model_dump() for tc in m.tool_calls] if m.tool_calls else None)
     return f"[{m.role}] {json.dumps(payload)[:2000]}"
 
