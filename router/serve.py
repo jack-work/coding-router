@@ -8,6 +8,7 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 import getpass
 import hashlib
@@ -677,7 +678,7 @@ def summarize_segment(text: str, client: openai.OpenAI, model: str) -> str:
         # cap is free (see AgentRunner.MIN_MAX_TOKENS for the measured version of
         # this lesson).
         r = client.chat.completions.create(
-            model=model, reasoning_effort="low", max_completion_tokens=4_000,
+            model=model, reasoning_effort="low", max_completion_tokens=4_000, timeout=20.0,
             messages=[{"role": "user", "content":
                        "Summarize this segment of a coding-agent conversation in under 120 "
                        "words. Keep only what matters for judging task difficulty and "
@@ -789,17 +790,21 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
     # The guard above makes these casts honest: exactly one dispatch mode is fully wired.
     summary_client = cast(openai.OpenAI, openrouter_client or openai_client)
 
+    embed_lock = threading.Lock()  # mlx/torch encoders aren't promised thread-safe
+
     def embed_text(text: str) -> np.ndarray:
         """Embed `text` locally in the artifact's own vector space, in-process."""
-        return local_embed(text[:EMBED_BUDGET])
+        with embed_lock:
+            return local_embed(text[:EMBED_BUDGET])
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         """Route one Chat Completions request to a real model and return its reply.
 
-        Embeds the whole conversation so far, routes it to an arm, dispatches to
-        that arm's provider (or OpenRouter, if configured), and returns the reply
-        in Chat Completions shape -- streamed as SSE chunks if `stream` was set.
+        The whole pipeline (summaries, local embedding, provider dispatch) is
+        blocking work, so it runs in a worker thread: one slow request -- a long
+        dispatch, a stuck summarizer -- must never stall the event loop and every
+        other session with it.
 
         Args:
             request: The raw incoming HTTP request; its JSON body is Chat
@@ -810,7 +815,10 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
             `StreamingResponse` emitting one SSE chunk plus a `[DONE]` sentinel
             when `stream` is set.
         """
-        body = await request.json()
+        return await asyncio.to_thread(complete, await request.json())
+
+    def complete(body: dict) -> JSONResponse | StreamingResponse:
+        """Route, dispatch, and shape one parsed Chat Completions request (sync)."""
         messages = [ChatMessage.model_validate(m) for m in body["messages"]]
         stream = bool(body.get("stream"))
 
@@ -828,9 +836,14 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
+        provider_s = t_done - t_routed
+        tps = (round(usage.completion_tokens / provider_s, 1)
+               if provider_s > 0 and usage.completion_tokens else None)
         logger.info(f"routed -> {decision.model}@{decision.effort or 'default'}  "
                     f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
-                    f"({len(messages)} messages in, traj={len(trajectory)}ch)")
+                    f"({len(messages)} messages in, traj={len(trajectory)}ch) | "
+                    f"routing {t_routed - t0:.2f}s, provider {provider_s:.1f}s, "
+                    f"{tps or '-'} tps")
         finish_reason = "tool_calls" if message.tool_calls else "stop"
 
         # Metadata-only telemetry (see the telemetry section + AGENTS.md): counts,
@@ -840,7 +853,6 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
         # token counts -- the standard counterfactual (the baseline model would
         # produce somewhat different output lengths).
         baseline = est_cost_usd(router.arm_spec[router.arms[router.fallback]].model, usage)
-        provider_s = t_done - t_routed
         capture("request_routed", {
             "model": decision.model, "effort": decision.effort,
             "p_solve": round(decision.p_solve, 3),
@@ -855,8 +867,7 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
             # Upstream dispatch is non-streaming, so first token == full response;
             # ttft gets its own honest meaning if/when passthrough streaming lands.
             "ttft_s": round(t_done - t0, 3), "total_s": round(t_done - t0, 3),
-            "tps": (round(usage.completion_tokens / provider_s, 1)
-                    if provider_s > 0 and usage.completion_tokens else None),
+            "tps": tps,
             "cost_usd": cost, "baseline_cost_usd": baseline,
             "est_savings_usd": (round(baseline - cost, 6)
                                 if cost is not None and baseline is not None else None),
