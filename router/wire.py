@@ -37,6 +37,10 @@ class ToolCall(BaseModel):
     id: str
     type: str = "function"
     function: FunctionCall
+    # Required on STREAMED tool calls: Chat Completions identifies each call by
+    # position, and clients key their accumulator on it. Absent on the buffered
+    # response, where the array order carries the same information.
+    index: int | None = None
 
 
 class CacheControl(BaseModel):
@@ -237,6 +241,132 @@ def wants_usage(body: dict) -> bool:
     if not isinstance(raw, dict):
         return False
     return StreamOptions.model_validate(raw).include_usage
+
+
+def usage_from_chat(raw) -> TokenUsage:
+    """Read a Chat Completions `usage` object into ours, cache split included."""
+    details = getattr(raw, "prompt_tokens_details", None)
+    return TokenUsage(
+        prompt_tokens=getattr(raw, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(raw, "completion_tokens", 0) or 0,
+        total_tokens=getattr(raw, "total_tokens", 0) or 0,
+        prompt_tokens_details=PromptTokensDetails(
+            cached_tokens=getattr(details, "cached_tokens", 0) or 0,
+            cache_write_tokens=getattr(details, "cache_write_tokens", 0) or 0))
+
+
+def usage_from_responses(raw) -> TokenUsage:
+    """Read a Responses API `usage` object into ours, cache split included."""
+    details = getattr(raw, "input_tokens_details", None)
+    return TokenUsage(
+        prompt_tokens=getattr(raw, "input_tokens", 0) or 0,
+        completion_tokens=getattr(raw, "output_tokens", 0) or 0,
+        total_tokens=getattr(raw, "total_tokens", 0) or 0,
+        prompt_tokens_details=PromptTokensDetails(
+            cached_tokens=getattr(details, "cached_tokens", 0) or 0,
+            cache_write_tokens=getattr(details, "cache_write_tokens", 0) or 0))
+
+
+class StreamDelta(BaseModel):
+    """One incremental piece of a streamed reply.
+
+    Providers differ in what arrives when -- text lands token by token, tool calls
+    usually land whole, usage lands last -- so a delta carries whichever of the
+    three it has and the renderer decides how to shape it.
+    """
+
+    text: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    usage: TokenUsage | None = None
+
+
+def collect(deltas: Iterator[StreamDelta]) -> tuple[ChatMessage, TokenUsage]:
+    """Drain a delta stream into the single message a non-streaming client expects.
+
+    Dispatch is streaming-native so there is one code path to the provider; this
+    is how the JSON response is assembled from it.
+
+    Args:
+        deltas: The provider's incremental output.
+
+    Returns:
+        The assembled assistant message and the reported token usage.
+    """
+    text: list[str] = []
+    tool_calls: list[ToolCall] = []
+    usage = TokenUsage()
+    for delta in deltas:
+        if delta.text:
+            text.append(delta.text)
+        if delta.tool_calls:
+            tool_calls.extend(delta.tool_calls)
+        if delta.usage is not None:
+            usage = delta.usage
+    return ChatMessage(role="assistant", content="".join(text) or None,
+                       tool_calls=tool_calls or None), usage
+
+
+def sse_passthrough(chunk_id: str, created: int, model: str,
+                    deltas: Iterator[StreamDelta], include_usage: bool) -> Iterator[str]:
+    """Render a provider's delta stream as SSE, forwarding each piece as it arrives.
+
+    The first chunk carries `role`, as Chat Completions requires; later chunks
+    carry only what changed. The finish chunk names `tool_calls` when any tool
+    call was seen and `stop` otherwise, and the usage chunk (if the client asked)
+    follows it with an empty `choices` list.
+
+    Args:
+        chunk_id: The completion id shared by every chunk.
+        created: Unix timestamp shared by every chunk.
+        model: The model producing the reply.
+        deltas: The provider's incremental output.
+        include_usage: Whether to emit a final usage chunk.
+
+    Yields:
+        Complete `data: ...` SSE lines, ending with the `[DONE]` sentinel.
+    """
+    def chunk(delta: ChatMessage, finish: str | None = None,
+              usage: TokenUsage | None = None) -> str:
+        """Serialize one chunk, with an empty choices list when it carries usage."""
+        choices = [] if usage is not None else [ChunkChoice(index=0, delta=delta,
+                                                            finish_reason=finish)]
+        payload = ChatCompletionChunk(id=chunk_id, created=created, model=model,
+                                      choices=choices, usage=usage)
+        return f"data: {payload.model_dump_json(exclude_none=True)}\n\n"
+
+    first, saw_tools, usage = True, False, TokenUsage()
+    positions: dict[str, int] = {}
+    for delta in deltas:
+        if delta.usage is not None:
+            usage = delta.usage
+        if not delta.text and not delta.tool_calls:
+            continue
+        # The index is per-STREAM, not per-delta. A provider that reports one
+        # completed call per delta -- the Responses API does -- would otherwise
+        # have every call stamped 0, and a client keying by index collapses them
+        # into a single call. Positions are held by id so a call keeps its own
+        # across however many deltas it arrives in.
+        calls = None
+        if delta.tool_calls:
+            calls = []
+            for c in delta.tool_calls:
+                key = c.id or f"#{len(positions)}"
+                calls.append(c.model_copy(
+                    update={"index": positions.setdefault(key, len(positions))}))
+        out = ChatMessage(content=delta.text, tool_calls=calls)
+        if first:
+            out.role = "assistant"
+            first = False
+        saw_tools = saw_tools or bool(delta.tool_calls)
+        yield chunk(out)
+    if first:
+        # An empty reply still needs a role-bearing chunk before the finish chunk,
+        # or a client accumulating deltas never learns whose turn it was.
+        yield chunk(ChatMessage(role="assistant", content=""))
+    yield chunk(ChatMessage(), finish="tool_calls" if saw_tools else "stop")
+    if include_usage:
+        yield chunk(ChatMessage(), usage=usage)
+    yield "data: [DONE]\n\n"
 
 
 def sse_stream(chunk_id: str, created: int, model: str, message: ChatMessage,
