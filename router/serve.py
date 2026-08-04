@@ -34,14 +34,17 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from router.router_core import (
     ARTIFACT_JSON,
     ARTIFACT_NPZ,
-    STANDARD,
     Decision,
     Router,
     TrainedRouter,
     cache_policy,
+    est_cost_usd,
     load_router,
+    remember_arm,
+    sticky_arm,
 )
 from router.wire import (
+    SESSION_KEY_MAX,
     ChatCompletionResponse,
     ChatMessage,
     ChatTool,
@@ -60,6 +63,7 @@ from router.wire import (
     messages_to_responses_input,
     parse_chat_tool,
     responses_output_to_message,
+    session_key,
     sse_passthrough,
     tools_to_anthropic,
     tools_to_responses,
@@ -90,77 +94,29 @@ def load_env(path: pathlib.Path | None = None) -> None:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------- sessions
-# OpenRouter caps the session key at 256 characters and reads it, in order, from
-# the body's `session_id`, the `x-session-id` header, then `prompt_cache_key`.
-SESSION_KEY_MAX = 256
-# Arm chosen per session, so a conversation keeps hitting one warm prefix. Bounded
-# and in-memory for the same reason the summary cache is: losing it on restart only
-# costs one re-decision, and the server stays stateless between requests.
-STICKY_CACHE_CAP = 512
-_sticky_arms: collections.OrderedDict[str, str] = collections.OrderedDict()
-
-
-def session_key(body: dict, headers) -> str | None:
-    """Resolve the caller's session key, or derive a stable one from the conversation.
-
-    Body beats header beats `prompt_cache_key`; when the client offers none, the
-    opening of the conversation is hashed instead. Chat Completions is stateless,
-    but a conversation is append-only, so its first system and first user message
-    are the same bytes on every later turn -- the same trick the summary cache uses.
-
-    The derived key is BEST-EFFORT CONTINUITY, not isolation: two conversations
-    that open with identical messages derive the same key and share an arm
-    preference (re-checked against the artifact every turn) and a cache-affinity
-    key. They also genuinely share a cacheable prefix, so the affinity is wanted.
-    Nothing stronger is possible from the request alone -- anything that told them
-    apart would also change between turns of one conversation, which is the case
-    stickiness exists for. A client that needs hard isolation sends `session_id`.
-
-    Args:
-        body: The parsed request body.
-        headers: The request headers (any mapping with `.get`).
-
-    Returns:
-        A key of at most SESSION_KEY_MAX characters, or None for an empty request.
-
-    NOTE: this value never reaches telemetry. It is derived from user content and
-    is treated as user content.
-    """
-    for candidate in (body.get("session_id"),
-                      headers.get("x-session-id") if headers is not None else None,
-                      body.get("prompt_cache_key")):
-        if isinstance(candidate, str) and candidate:
-            return candidate[:SESSION_KEY_MAX]
-    messages = body.get("messages") or []
-    opening = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"][:1]
-    opening += [m for m in messages if isinstance(m, dict) and m.get("role") == "user"][:1]
-    if not opening:
-        return None
-    return hashlib.sha256(json.dumps(opening, sort_keys=True).encode()).hexdigest()[:32]
-
-
-def sticky_arm(key: str | None) -> str | None:
-    """The arm this session used last, if any."""
-    if key is None or key not in _sticky_arms:
-        return None
-    _sticky_arms.move_to_end(key)
-    return _sticky_arms[key]
-
-
-def remember_arm(key: str | None, arm_id: str) -> None:
-    """Record the arm this session just used, evicting the least recent when full."""
-    if key is None:
-        return
-    _sticky_arms[key] = arm_id
-    _sticky_arms.move_to_end(key)
-    if len(_sticky_arms) > STICKY_CACHE_CAP:
-        _sticky_arms.popitem(last=False)
-
-
 def prompt_chars(system: str | None, messages: list[ChatMessage]) -> int:
     """Approximate the outbound prompt's size in characters, for the minimum check."""
     return len(system or "") + sum(len(m.text()) for m in messages)
+
+
+_implicit_cache_noticed = False
+
+
+def note_implicit_cache() -> None:
+    """Say once that a provider cached even though directives were switched off.
+
+    `--nocache` governs what this router SENDS. A provider in the implicit-caching
+    family takes no request-side signal at all, so it keeps caching a stable
+    prefix regardless, and a user watching cost expects to be told rather than to
+    discover it in an invoice.
+    """
+    global _implicit_cache_noticed
+    if _implicit_cache_noticed:
+        return
+    _implicit_cache_noticed = True
+    logger.info("note: --nocache stops the cache directives THIS ROUTER sends; the "
+                "provider just served a cache read anyway, because it caches "
+                "implicitly and takes no request-side signal")
 
 
 # Only standard API-key auth is used here, never OAuth/subscription-plan login
@@ -278,23 +234,6 @@ def capture(event: str, properties: dict[str, Any]) -> None:
         pass
 
 
-def est_cost_usd(model: str, usage: TokenUsage) -> float | None:
-    """Estimate one request's USD cost from the price table, or None if unpriced.
-
-    Prices the four buckets separately -- uncached input, cache reads, cache
-    writes, output -- from the token split the provider reported. When a provider
-    reports no split the whole prompt bills as uncached input, the old behaviour.
-    """
-    provider = "anthropic" if model.startswith("claude") else "openai"
-    price = STANDARD.get(provider, {}).get(model)
-    if price is None:
-        return None
-    return (usage.uncached_prompt * price.inp
-            + usage.cache_read * price.cache_read
-            + usage.cache_write * price.cache_write
-            + usage.completion_tokens * price.out) / 1_000_000
-
-
 def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTool] | None,
             openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic,
             *, cache: bool = True, ttl: str | None = None, session: str | None = None,
@@ -316,9 +255,13 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
         ttl: Cache lifetime to request, e.g. "1h"; None means the provider default.
         session: Stable session key, sent to OpenAI as `prompt_cache_key` so repeat
             turns land on the machine holding the warm prefix.
-        stream: Ask the provider to stream. Set only when the CLIENT asked to stream:
-            some gateways omit the cache split from streamed usage, so a buffered
-            client must not pay for a transport it did not request.
+        stream: Ask the provider to stream. Only set when the CLIENT asked to
+            stream: some gateways omit `prompt_tokens_details` from streamed usage
+            (measured: LiteLLM over Copilot), so a buffered client must not pay
+            for a transport it did not request. When it is missing, only the
+            ATTRIBUTION is lost -- `prompt_tokens` is still whole, so a client
+            summing input + cached + written + output still gets the right
+            context size, it just cannot tell how much of the prompt was cached.
 
     Yields:
         `StreamDelta`s carrying text, tool calls, and finally token usage (whose
@@ -361,7 +304,7 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
                                                       cache_write_tokens=write)))
         return
 
-    system, input_items = messages_to_responses_input(messages)
+    system, input_items = messages_to_responses_input(messages, policy)
     # OpenAI caches implicitly; the only lever is routing repeat turns to the machine
     # that holds the prefix, which is what prompt_cache_key pins.
     extra = {"prompt_cache_key": session} if (cache and session) else {}
@@ -420,7 +363,8 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
         cache: Whether to drive prompt caching at all.
         ttl: Cache lifetime to request, e.g. "1h"; None means the provider default.
         session: Stable session key for sticky routing (<=256 chars).
-        stream: Ask the gateway to stream; see `dispatch` for why it follows the client.
+        stream: Ask the gateway to stream; see `dispatch` for why this follows the
+            client rather than always being on.
 
     Yields:
         `StreamDelta`s carrying text, tool calls, and finally token usage.
@@ -438,11 +382,8 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
             body["cache_control"] = cc
         if session:
             body["session_id"] = session[:SESSION_KEY_MAX]
-    # Usage only rides along a stream when it is asked for, and without it every
-    # bucket reads zero however much was really spent.
     call = dict(model=f"{family}/{decision.model}", messages=raw_messages,
-                tools=raw_tools, max_tokens=DISPATCH_MAX_TOKENS,
-                extra_body=body or None)
+                tools=raw_tools, extra_body=body or None)
     if not stream:
         r = client.chat.completions.create(**call)
         buffered = ChatMessage.model_validate(
@@ -453,6 +394,8 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
             yield StreamDelta(tool_calls=buffered.tool_calls)
         yield StreamDelta(usage=usage_from_chat(r.usage))
         return
+    # Usage only rides along a stream when it is asked for, and without it every
+    # bucket reads zero however much was really spent.
     chunks = client.chat.completions.create(
         stream=True, stream_options={"include_usage": True}, **call)
     pending: dict[int, ToolCall] = {}
@@ -817,6 +760,8 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
             until the provider's stream ends.
             """
             t_done = timing.get("last", time.perf_counter())
+            if not cache and usage.cache_read:
+                note_implicit_cache()
             provider_s = t_done - t_routed
             ttft_s = timing.get("first", t_done) - t0
             tps = (round(usage.completion_tokens / provider_s, 1)
@@ -831,13 +776,20 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
 
             # Metadata-only telemetry (see the telemetry section + AGENTS.md): counts,
             # durations, model ids, and cost estimates -- never any request content.
-            cost = est_cost_usd(decision.model, usage)
+            def price(model: str) -> float | None:
+                """Cost of this request's measured tokens under `model`'s rates."""
+                return est_cost_usd(model, inp=usage.uncached_prompt,
+                                    cache_read=usage.cache_read,
+                                    cache_write=usage.cache_write,
+                                    out=usage.completion_tokens)
+
+            cost = price(decision.model)
             # Savings vs the always-strongest-arm baseline, priced on THIS request's
             # token counts -- the standard counterfactual (the baseline model would
             # produce somewhat different output lengths). Both sides now price cache
             # reads and writes from the reported split, so the figure is smaller, and
             # honest: the baseline arm would have been cached too.
-            baseline = est_cost_usd(router.arm_spec[router.arms[router.fallback]].model, usage)
+            baseline = price(router.arm_spec[router.arms[router.fallback]].model)
             capture("request_routed", {
                 "model": decision.model, "effort": decision.effort,
                 "p_solve": round(decision.p_solve, 3),
@@ -952,7 +904,9 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
         summary_model: Model used for those summaries.
         cache: Drive provider prompt caching -- breakpoints on Anthropic, the
             request-level directive via OpenRouter, `prompt_cache_key` on OpenAI.
-            `--nocache` sends none of it.
+            `--nocache` sends none of it. It does NOT switch caching off: providers
+            that cache implicitly take no request-side signal and will keep caching
+            a stable prefix regardless.
         cache_ttl: Ask for a longer cache lifetime, e.g. "1h". Anthropic bills a 1h
             write at 2x input instead of 1.25x, so it pays off only across a session
             longer than the 5-minute default.
@@ -996,6 +950,9 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
     logger.info(f"ready: {len(router.arms)} arms, {router.rule}, via={via}, "
                 f"summarize={summarize}, cache={cache}"
                 f"{'/' + cache_ttl if cache_ttl else ''}, sticky={sticky}")
+    if not cache:
+        logger.info("cache: directives OFF -- this stops what the router sends, not "
+                    "caching itself; implicit-caching providers still cache")
 
     if telemetry_enabled():
         start_telemetry()

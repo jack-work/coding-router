@@ -7,6 +7,7 @@ harness, CV policies, benchmarks — lives in world-model-optimizer's
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import json
 import logging
@@ -78,6 +79,30 @@ OPENAI_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
+def est_cost_usd(model: str, *, inp: int = 0, cache_read: int = 0, cache_write: int = 0,
+                 out: int = 0) -> float | None:
+    """Estimate one request's USD cost from the price table, or None if unpriced.
+
+    Takes the four token buckets rather than a usage object, mirroring `Arm.cost`
+    and keeping this file free of any dependency on the wire format.
+
+    Args:
+        inp: Prompt tokens billed at the full input rate.
+        cache_read: Prompt tokens served from cache.
+        cache_write: Prompt tokens written to cache.
+        out: Output tokens, including reasoning.
+
+    Returns:
+        The estimated cost in USD, or None when the model is not in the table.
+    """
+    provider = "anthropic" if model.startswith("claude") else "openai"
+    price = STANDARD.get(provider, {}).get(model)
+    if price is None:
+        return None
+    return (inp * price.inp + cache_read * price.cache_read
+            + cache_write * price.cache_write + out * price.out) / 1_000_000
+
+
 # ============================================================================ prompt caching
 # Providers split two ways: some cache any stable prefix implicitly and take no
 # request-side signal at all; others cache only what a `cache_control` breakpoint
@@ -87,6 +112,15 @@ ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 CacheStyle = Literal["explicit", "automatic", "none"]
 
 CACHE_EXPLICIT_PROVIDERS = frozenset({"anthropic"})
+
+# OpenAI caches implicitly on every model, but from the GPT-5.6 generation it also
+# accepts an explicit breakpoint -- `prompt_cache_breakpoint` on a text block, the
+# same idea as Anthropic's `cache_control` under a different name. OpenRouter
+# documents the two block markers as interchangeable, so a client that marked its
+# blocks gets those marks honoured rather than dropped when the router happens to
+# pick an OpenAI arm. TTL does NOT translate: `cache_control.ttl` is dropped
+# toward OpenAI, whose explicit prefixes carry their own 30-minute minimum.
+OPENAI_EXPLICIT_CACHE_MODELS = frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"})
 
 # Anthropic rejects a request carrying more than four cache_control blocks with
 # HTTP 400, so this is a cap to enforce rather than a guideline. A gateway that
@@ -122,6 +156,9 @@ class CachePolicy(BaseModel):
     min_tokens: int
     max_breakpoints: int = MAX_CACHE_BREAKPOINTS
     ttl: str | None = None      # None -> the provider default (5m); "1h" costs 2x on write
+    # The request field this provider spells a breakpoint with, or None when it
+    # accepts no explicit marks at all.
+    breakpoint_field: str | None = None
 
     def worth_marking(self, chars: int) -> bool:
         """Whether a prompt of `chars` characters is long enough to be worth a breakpoint.
@@ -147,10 +184,16 @@ def cache_policy(provider: str, model: str, *, ttl: str | None = None) -> CacheP
     Returns:
         The `CachePolicy` describing how (and whether) to mark this request.
     """
-    style: CacheStyle = "explicit" if provider in CACHE_EXPLICIT_PROVIDERS else "automatic"
+    explicit = provider in CACHE_EXPLICIT_PROVIDERS
+    style: CacheStyle = "explicit" if explicit else "automatic"
+    field = None
+    if explicit:
+        field = "cache_control"
+    elif model in OPENAI_EXPLICIT_CACHE_MODELS:
+        field = "prompt_cache_breakpoint"
     return CachePolicy(style=style,
                        min_tokens=CACHE_MIN_TOKENS.get(model, CACHE_MIN_TOKENS_DEFAULT),
-                       ttl=ttl)
+                       ttl=ttl, breakpoint_field=field)
 
 
 # ============================================================================ stickiness
@@ -169,6 +212,31 @@ def cache_policy(provider: str, model: str, *, ttl: str | None = None) -> CacheP
 # EXP-012 certified. Pass prefer=None (serve's --nosticky) to reproduce those
 # numbers exactly.
 STICKY_MARGIN = 0.02
+
+
+# Arm chosen per session, so a conversation keeps hitting one warm prefix. Bounded
+# and in-memory for the same reason the summary cache is: losing it on restart only
+# costs one re-decision, and the server stays stateless between requests.
+STICKY_CACHE_CAP = 512
+_sticky_arms: collections.OrderedDict[str, str] = collections.OrderedDict()
+
+
+def sticky_arm(key: str | None) -> str | None:
+    """The arm this session used last, if any."""
+    if key is None or key not in _sticky_arms:
+        return None
+    _sticky_arms.move_to_end(key)
+    return _sticky_arms[key]
+
+
+def remember_arm(key: str | None, arm_id: str) -> None:
+    """Record the arm this session just used, evicting the least recent when full."""
+    if key is None:
+        return
+    _sticky_arms[key] = arm_id
+    _sticky_arms.move_to_end(key)
+    if len(_sticky_arms) > STICKY_CACHE_CAP:
+        _sticky_arms.popitem(last=False)
 
 
 class Arm(BaseModel):

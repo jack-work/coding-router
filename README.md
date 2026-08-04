@@ -35,7 +35,14 @@ you will still see `cached_tokens` come back.
 Stickiness is what makes caching pay: a conversation stays on the arm it started with while
 that arm still clears the artifact's own bar, because a cache lives per model and exact
 prefix, so switching arms mid-conversation throws it away. Escalation always overrides it.
-Cache reads and writes are reported back in `usage.prompt_tokens_details`.
+Cache reads and writes are reported back in `usage.prompt_tokens_details`, on the JSON
+response and — when a streaming client sends `stream_options.include_usage` — on a final
+chunk before `[DONE]`.
+
+Some gateways drop `prompt_tokens_details` from streamed usage. Where that happens you
+lose the attribution, not the count: `prompt_tokens` remains whole, so the context size a
+client computes is still right; it simply cannot see how much of the prompt was served
+from cache. Ask for a non-streaming response if you need the split.
 
 ## Telemetry
 

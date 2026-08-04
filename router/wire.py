@@ -6,6 +6,7 @@ definition; `serve.py` owns the server, routing, and dispatch that use them.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -220,6 +221,50 @@ class ChatCompletionChunk(BaseModel):
     usage: TokenUsage | None = None
 
 
+# OpenRouter caps the session key at 256 characters and reads it, in order, from
+# the body's `session_id`, the `x-session-id` header, then `prompt_cache_key`.
+SESSION_KEY_MAX = 256
+
+
+def session_key(body: dict, headers) -> str | None:
+    """Resolve the caller's session key, or derive a stable one from the conversation.
+
+    Body beats header beats `prompt_cache_key`; when the client offers none, the
+    opening of the conversation is hashed instead. Chat Completions is stateless,
+    but a conversation is append-only, so its first system and first user message
+    are the same bytes on every later turn -- the same trick the summary cache uses.
+
+    The derived key is BEST-EFFORT CONTINUITY, not isolation: two conversations
+    that open with identical messages derive the same key and share an arm
+    preference (re-checked against the artifact every turn) and a cache-affinity
+    key. They also genuinely share a cacheable prefix, so the affinity is wanted.
+    Nothing stronger is possible from the request alone -- anything that told them
+    apart would also change between turns of one conversation, which is the case
+    stickiness exists for. A client that needs hard isolation sends `session_id`.
+
+    Args:
+        body: The parsed request body.
+        headers: The request headers (any mapping with `.get`).
+
+    Returns:
+        A key of at most SESSION_KEY_MAX characters, or None for an empty request.
+
+    NOTE: this value never reaches telemetry. It is derived from user content and
+    is treated as user content.
+    """
+    for candidate in (body.get("session_id"),
+                      headers.get("x-session-id") if headers is not None else None,
+                      body.get("prompt_cache_key")):
+        if isinstance(candidate, str) and candidate:
+            return candidate[:SESSION_KEY_MAX]
+    messages = body.get("messages") or []
+    opening = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"][:1]
+    opening += [m for m in messages if isinstance(m, dict) and m.get("role") == "user"][:1]
+    if not opening:
+        return None
+    return hashlib.sha256(json.dumps(opening, sort_keys=True).encode()).hexdigest()[:32]
+
+
 class StreamOptions(BaseModel):
     """The `stream_options` object of a streaming Chat Completions request."""
 
@@ -369,44 +414,6 @@ def sse_passthrough(chunk_id: str, created: int, model: str,
     yield "data: [DONE]\n\n"
 
 
-def sse_stream(chunk_id: str, created: int, model: str, message: ChatMessage,
-               finish_reason: str | None, usage: TokenUsage,
-               include_usage: bool) -> Iterator[str]:
-    """Render one completed reply as the SSE lines a Chat Completions client expects.
-
-    Upstream dispatch is not streamed, so the whole reply arrives at once and is
-    emitted as one content chunk plus a finish chunk. When the client set
-    `stream_options.include_usage`, a final chunk carrying `usage` and an EMPTY
-    `choices` list follows, which is where OpenAI puts it and the only place a
-    streaming client will look for token counts.
-
-    Args:
-        chunk_id: The completion id shared by every chunk.
-        created: Unix timestamp shared by every chunk.
-        model: The model that produced the reply.
-        message: The assistant message to deliver.
-        finish_reason: "stop" or "tool_calls".
-        usage: Token counts for the request, including the cache split.
-        include_usage: Whether to emit the final usage chunk.
-
-    Yields:
-        Complete `data: ...` SSE lines, ending with the `[DONE]` sentinel.
-    """
-    head = ChatCompletionChunk(id=chunk_id, created=created, model=model,
-                               choices=[ChunkChoice(index=0, delta=message,
-                                                    finish_reason=None)])
-    yield f"data: {head.model_dump_json(exclude_none=True)}\n\n"
-    tail = ChatCompletionChunk(id=chunk_id, created=created, model=model,
-                               choices=[ChunkChoice(index=0, delta=ChatMessage(),
-                                                    finish_reason=finish_reason)])
-    yield f"data: {tail.model_dump_json(exclude_none=True)}\n\n"
-    if include_usage:
-        final = ChatCompletionChunk(id=chunk_id, created=created, model=model,
-                                    choices=[], usage=usage)
-        yield f"data: {final.model_dump_json(exclude_none=True)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
 class ModelCard(BaseModel):
     """One entry in the `/v1/models` listing."""
 
@@ -424,19 +431,39 @@ class ModelList(BaseModel):
 
 # ---------------------------------------------------------------- Chat Completions -> OpenAI Responses
 
-def messages_to_responses_input(messages: list[ChatMessage]) -> tuple[str | None, list[dict]]:
+def messages_to_responses_input(messages: list[ChatMessage],
+                                policy: CachePolicy | None = None,
+                                ) -> tuple[str | None, list[dict]]:
     """Translate Chat Completions messages into a Responses API instructions/input pair.
+
+    A client's `cache_control` markers are carried across rather than dropped when
+    the chosen model accepts explicit breakpoints: OpenAI spells the same idea
+    `prompt_cache_breakpoint`, and the two block markers are interchangeable. TTL
+    is not translated -- OpenAI's explicit prefixes carry their own minimum
+    lifetime -- so only the position of the breakpoint survives.
 
     Args:
         messages: Chat Completions-style message list.
+        policy: The chosen arm's cache policy; when its `breakpoint_field` names
+            OpenAI's spelling, marked messages are sent as blocks instead of text.
 
     Returns:
         A (system_instructions, input_items) pair for `client.responses.create()`.
     """
+    marker = policy.breakpoint_field if policy else None
+    keep_marks = marker == "prompt_cache_breakpoint"
+    marked_positions: list[int] = []
     system, items = None, []
     for m in messages:
         role = m.role
         text = m.text()
+        if keep_marks and role not in ("system", "tool") and not m.tool_calls and m.markers():
+            marked_positions.append(len(items))
+            items.append({"role": role, "content": [
+                {"type": "input_text", "text": b.text or "",
+                 **({marker: {"mode": "explicit"}} if b.cache_control else {})}
+                for b in m.blocks() if b.type == "text"]})
+            continue
         if role == "system":
             system = (system + "\n\n" + text) if system else text
         elif role == "tool":
@@ -451,7 +478,34 @@ def messages_to_responses_input(messages: list[ChatMessage]) -> tuple[str | None
                 items.append({"role": "assistant", "content": text})
         else:
             items.append({"role": role, "content": text})
+    if keep_marks and not marked_positions:
+        _mark_last_stable_user(items, marker)
     return system, items
+
+
+def _mark_last_stable_user(items: list[dict], marker: str) -> None:
+    """Put one breakpoint on the newest user turn that is not the current one.
+
+    The final item is the question being asked and differs every turn, so a
+    prefix cut there is written and never read. The user turn before it was sent
+    byte-for-byte last time, which is the boundary worth cutting on. Mirrors the
+    rolling tail the Anthropic path marks, and stays on `input_text`, the one
+    block type this translation already emits.
+
+    UNVERIFIED AGAINST A LIVE PROVIDER. `--via=openrouter` sends every arm down
+    the Chat Completions path, so nothing in our measurements exercises this.
+
+    Args:
+        items: Responses API input items, mutated in place.
+        marker: The breakpoint field name for this provider.
+    """
+    for i in range(len(items) - 2, -1, -1):
+        item = items[i]
+        if item.get("role") != "user" or not isinstance(item.get("content"), str):
+            continue
+        item["content"] = [{"type": "input_text", "text": item["content"],
+                            marker: {"mode": "explicit"}}]
+        return
 
 
 def tools_to_responses(tools: list[ChatTool] | None) -> list[dict]:
