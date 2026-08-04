@@ -42,12 +42,10 @@ from router.router_core import (
     load_router,
 )
 from router.wire import (
-    ChatCompletionChunk,
     ChatCompletionResponse,
     ChatMessage,
     ChatTool,
     Choice,
-    ChunkChoice,
     ModelCard,
     ModelList,
     PromptTokensDetails,
@@ -58,8 +56,10 @@ from router.wire import (
     messages_to_responses_input,
     parse_chat_tool,
     responses_output_to_message,
+    sse_stream,
     tools_to_anthropic,
     tools_to_responses,
+    wants_usage,
 )
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -779,19 +779,10 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
                 usage=usage)
             return JSONResponse(resp.model_dump(exclude_none=True))
 
-        def sse():
-            """Yield the reply as two SSE `chat.completion.chunk` lines plus `[DONE]`."""
-            chunk = ChatCompletionChunk(
-                id=completion_id, created=created, model=decision.model,
-                choices=[ChunkChoice(index=0, delta=message, finish_reason=None)])
-            yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-            done = ChatCompletionChunk(
-                id=completion_id, created=created, model=decision.model,
-                choices=[ChunkChoice(index=0, delta=ChatMessage(), finish_reason=finish_reason)])
-            yield f"data: {done.model_dump_json(exclude_none=True)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(sse(), media_type="text/event-stream")
+        return StreamingResponse(
+            sse_stream(completion_id, created, decision.model, message, finish_reason,
+                       usage, wants_usage(body)),
+            media_type="text/event-stream")
 
     @app.get("/v1/models")
     def models() -> ModelList:
