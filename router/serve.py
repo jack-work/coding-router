@@ -38,6 +38,7 @@ from router.router_core import (
     Decision,
     Router,
     TrainedRouter,
+    cache_policy,
     load_router,
 )
 from router.wire import (
@@ -49,8 +50,10 @@ from router.wire import (
     ChunkChoice,
     ModelCard,
     ModelList,
+    PromptTokensDetails,
     TokenUsage,
     anthropic_response_to_message,
+    mark_anthropic_cache,
     messages_to_anthropic,
     messages_to_responses_input,
     parse_chat_tool,
@@ -79,6 +82,79 @@ def load_env(path: pathlib.Path | None = None) -> None:
             os.environ.setdefault(k.strip(), v.strip())
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------- sessions
+# OpenRouter caps the session key at 256 characters and reads it, in order, from
+# the body's `session_id`, the `x-session-id` header, then `prompt_cache_key`.
+SESSION_KEY_MAX = 256
+# Arm chosen per session, so a conversation keeps hitting one warm prefix. Bounded
+# and in-memory for the same reason the summary cache is: losing it on restart only
+# costs one re-decision, and the server stays stateless between requests.
+STICKY_CACHE_CAP = 512
+_sticky_arms: collections.OrderedDict[str, str] = collections.OrderedDict()
+
+
+def session_key(body: dict, headers) -> str | None:
+    """Resolve the caller's session key, or derive a stable one from the conversation.
+
+    Body beats header beats `prompt_cache_key`; when the client offers none, the
+    opening of the conversation is hashed instead. Chat Completions is stateless,
+    but a conversation is append-only, so its first system and first user message
+    are the same bytes on every later turn -- the same trick the summary cache uses.
+
+    The derived key is BEST-EFFORT CONTINUITY, not isolation: two conversations
+    that open with identical messages derive the same key and share an arm
+    preference (re-checked against the artifact every turn) and a cache-affinity
+    key. They also genuinely share a cacheable prefix, so the affinity is wanted.
+    Nothing stronger is possible from the request alone -- anything that told them
+    apart would also change between turns of one conversation, which is the case
+    stickiness exists for. A client that needs hard isolation sends `session_id`.
+
+    Args:
+        body: The parsed request body.
+        headers: The request headers (any mapping with `.get`).
+
+    Returns:
+        A key of at most SESSION_KEY_MAX characters, or None for an empty request.
+
+    NOTE: this value never reaches telemetry. It is derived from user content and
+    is treated as user content.
+    """
+    for candidate in (body.get("session_id"),
+                      headers.get("x-session-id") if headers is not None else None,
+                      body.get("prompt_cache_key")):
+        if isinstance(candidate, str) and candidate:
+            return candidate[:SESSION_KEY_MAX]
+    messages = body.get("messages") or []
+    opening = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"][:1]
+    opening += [m for m in messages if isinstance(m, dict) and m.get("role") == "user"][:1]
+    if not opening:
+        return None
+    return hashlib.sha256(json.dumps(opening, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def sticky_arm(key: str | None) -> str | None:
+    """The arm this session used last, if any."""
+    if key is None or key not in _sticky_arms:
+        return None
+    _sticky_arms.move_to_end(key)
+    return _sticky_arms[key]
+
+
+def remember_arm(key: str | None, arm_id: str) -> None:
+    """Record the arm this session just used, evicting the least recent when full."""
+    if key is None:
+        return
+    _sticky_arms[key] = arm_id
+    _sticky_arms.move_to_end(key)
+    if len(_sticky_arms) > STICKY_CACHE_CAP:
+        _sticky_arms.popitem(last=False)
+
+
+def prompt_chars(system: str | None, messages: list[ChatMessage]) -> int:
+    """Approximate the outbound prompt's size in characters, for the minimum check."""
+    return len(system or "") + sum(len(m.text()) for m in messages)
 
 
 # Only standard API-key auth is used here, never OAuth/subscription-plan login
@@ -199,18 +275,23 @@ def capture(event: str, properties: dict[str, Any]) -> None:
 def est_cost_usd(model: str, usage: TokenUsage) -> float | None:
     """Estimate one request's USD cost from the price table, or None if unpriced.
 
-    Approximation: bills all prompt tokens at the uncached input rate (cache-read
-    splits aren't tracked per-request here), so real cost is usually LOWER.
+    Prices the four buckets separately -- uncached input, cache reads, cache
+    writes, output -- from the token split the provider reported. When a provider
+    reports no split the whole prompt bills as uncached input, the old behaviour.
     """
     provider = "anthropic" if model.startswith("claude") else "openai"
     price = STANDARD.get(provider, {}).get(model)
     if price is None:
         return None
-    return (usage.prompt_tokens * price.inp + usage.completion_tokens * price.out) / 1_000_000
+    return (usage.uncached_prompt * price.inp
+            + usage.cache_read * price.cache_read
+            + usage.cache_write * price.cache_write
+            + usage.completion_tokens * price.out) / 1_000_000
 
 
 def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTool] | None,
             openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic,
+            *, cache: bool = True, ttl: str | None = None, session: str | None = None,
             ) -> tuple[ChatMessage, TokenUsage]:
     """Call the real provider for a routed decision and return the reply plus token usage.
 
@@ -220,43 +301,62 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
         tools: The incoming Chat Completions-style tool definitions, if any.
         openai_client: Client used when the decision picked an OpenAI arm.
         anthropic_client: Client used when the decision picked an Anthropic arm.
+        cache: Whether to drive prompt caching at all (`--nocache` turns it off).
+        ttl: Cache lifetime to request, e.g. "1h"; None means the provider default.
+        session: Stable session key, sent to OpenAI as `prompt_cache_key` so repeat
+            turns land on the machine holding the warm prefix.
 
     Returns:
         The provider's reply as a Chat Completions `ChatMessage`, and its `TokenUsage`
         (prompt tokens include cache reads/writes so counts are comparable across
         providers -- Anthropic reports those separately, OpenAI folds them in).
     """
-    if decision.model.startswith("claude"):
+    provider = "anthropic" if decision.model.startswith("claude") else "openai"
+    policy = cache_policy(provider, decision.model, ttl=ttl)
+    if provider == "anthropic":
         system, anthropic_messages = messages_to_anthropic(messages)
-        kwargs = {}
-        if system:
-            kwargs["system"] = [{"type": "text", "text": system,
-                                 "cache_control": {"type": "ephemeral"}}]
+        anthropic_tools = tools_to_anthropic(tools)
+        system_blocks = ([{"type": "text", "text": system}] if system else [])
+        if cache and policy.worth_marking(prompt_chars(system, messages)):
+            mark_anthropic_cache(system_blocks, anthropic_tools, anthropic_messages, policy)
+        kwargs = {"system": system_blocks} if system_blocks else {}
         # Anthropic requires streaming for requests that might run long at this
         # max_tokens; .stream() avoids that restriction and still returns one
         # complete message via get_final_message(), same as .create() would.
         with anthropic_client.messages.stream(
                 messages=anthropic_messages, max_tokens=DISPATCH_MAX_TOKENS,
-                tools=tools_to_anthropic(tools), **kwargs, **decision.request_kwargs) as stream:
+                tools=anthropic_tools, **kwargs, **decision.request_kwargs) as stream:
             r = stream.get_final_message()
-        prompt = (r.usage.input_tokens + (getattr(r.usage, "cache_read_input_tokens", 0) or 0)
-                  + (getattr(r.usage, "cache_creation_input_tokens", 0) or 0))
+        read = getattr(r.usage, "cache_read_input_tokens", 0) or 0
+        write = getattr(r.usage, "cache_creation_input_tokens", 0) or 0
+        prompt = r.usage.input_tokens + read + write
         usage = TokenUsage(prompt_tokens=prompt, completion_tokens=r.usage.output_tokens,
-                           total_tokens=prompt + r.usage.output_tokens)
+                           total_tokens=prompt + r.usage.output_tokens,
+                           prompt_tokens_details=PromptTokensDetails(
+                               cached_tokens=read, cache_write_tokens=write))
         return anthropic_response_to_message(r.content), usage
 
     system, input_items = messages_to_responses_input(messages)
+    # OpenAI caches implicitly; the only lever is routing repeat turns to the machine
+    # that holds the prefix, which is what prompt_cache_key pins.
+    extra = {"prompt_cache_key": session} if (cache and session) else {}
     r = openai_client.responses.create(
         instructions=system, input=input_items, max_output_tokens=DISPATCH_MAX_TOKENS,
-        tools=tools_to_responses(tools), **decision.request_kwargs)
+        tools=tools_to_responses(tools), **extra, **decision.request_kwargs)
+    details = getattr(r.usage, "input_tokens_details", None)
     usage = TokenUsage(prompt_tokens=getattr(r.usage, "input_tokens", 0) or 0,
                        completion_tokens=getattr(r.usage, "output_tokens", 0) or 0,
-                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0)
+                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0,
+                       prompt_tokens_details=PromptTokensDetails(
+                           cached_tokens=getattr(details, "cached_tokens", 0) or 0,
+                           cache_write_tokens=getattr(details, "cache_write_tokens", 0) or 0))
     return responses_output_to_message(r.output), usage
 
 
 def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
                             tools: list[ChatTool] | None, client: openai.OpenAI,
+                            *, cache: bool = True, ttl: str | None = None,
+                            session: str | None = None,
                             ) -> tuple[ChatMessage, TokenUsage]:
     """Call the routed model through OpenRouter instead of the provider directly.
 
@@ -264,13 +364,23 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
     uses, so no format translation is needed -- only the model id gets a provider
     prefix and the request goes to a different base_url. Messages/tools are
     re-serialized back to plain dicts for the SDK call, keeping any fields our own
-    models don't declare (via `extra="allow"` above).
+    models don't declare (via `extra="allow"` above), which is what carries a
+    client's own `cache_control` markers through untouched.
+
+    Caching is driven with OpenRouter's request-level directive rather than by
+    placing breakpoints here: it advances the breakpoint through the conversation
+    itself, and it is the form OpenRouter documents for multi-turn chat. It applies
+    to explicit-cache providers only; implicit ones ignore it. `session_id` pins
+    sticky routing so later turns reach the endpoint holding the warm prefix.
 
     Args:
         decision: A `router_core.Decision` naming the chosen arm.
         messages: The incoming Chat Completions-style conversation, passed through as-is.
         tools: The incoming Chat Completions-style tool definitions, if any.
         client: An `openai.OpenAI` client pointed at OpenRouter's base_url.
+        cache: Whether to drive prompt caching at all.
+        ttl: Cache lifetime to request, e.g. "1h"; None means the provider default.
+        session: Stable session key for sticky routing (<=256 chars).
 
     Returns:
         The provider's reply as a Chat Completions `ChatMessage`, and its `TokenUsage`.
@@ -278,11 +388,26 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
     family = "anthropic" if decision.model.startswith("claude") else "openai"
     raw_messages = [m.model_dump(exclude_none=True) for m in messages]
     raw_tools = [t.model_dump(exclude_none=True) for t in tools] if tools else None
+    body: dict[str, Any] = {}
+    if cache:
+        policy = cache_policy(family, decision.model, ttl=ttl)
+        if policy.style == "explicit":
+            cc: dict[str, str] = {"type": "ephemeral"}
+            if policy.ttl:
+                cc["ttl"] = policy.ttl
+            body["cache_control"] = cc
+        if session:
+            body["session_id"] = session[:SESSION_KEY_MAX]
     r = client.chat.completions.create(
-        model=f"{family}/{decision.model}", messages=raw_messages, tools=raw_tools)
+        model=f"{family}/{decision.model}", messages=raw_messages, tools=raw_tools,
+        extra_body=body or None)
+    details = getattr(r.usage, "prompt_tokens_details", None)
     usage = TokenUsage(prompt_tokens=getattr(r.usage, "prompt_tokens", 0) or 0,
                        completion_tokens=getattr(r.usage, "completion_tokens", 0) or 0,
-                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0)
+                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0,
+                       prompt_tokens_details=PromptTokensDetails(
+                           cached_tokens=getattr(details, "cached_tokens", 0) or 0,
+                           cache_write_tokens=getattr(details, "cache_write_tokens", 0) or 0))
     return ChatMessage.model_validate(r.choices[0].message.model_dump(exclude_none=True)), usage
 
 
@@ -516,7 +641,9 @@ def build_trajectory(messages: list[ChatMessage], client: openai.OpenAI,
 def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None,
             anthropic_client: anthropic.Anthropic | None,
             openrouter_client: openai.OpenAI | None = None,
-            summary_model: str = SUMMARY_MODEL, summarize_middle: bool = True) -> FastAPI:
+            summary_model: str = SUMMARY_MODEL, summarize_middle: bool = True,
+            cache: bool = True, cache_ttl: str | None = None,
+            sticky: bool = True) -> FastAPI:
     """Build the FastAPI app exposing /v1/chat/completions and /v1/models.
 
     Routing itself (embedding + kNN) runs fully locally -- the clients below exist
@@ -533,6 +660,9 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
         summary_model: Model used to summarize older trajectory chunks.
         summarize_middle: If False, long conversations embed anchor + recent only
             (no summarization calls at all).
+        cache: Drive provider prompt caching (breakpoints, directives, cache keys).
+        cache_ttl: Cache lifetime to request, e.g. "1h" (2x write on Anthropic).
+        sticky: Keep a session on the arm it used last, so its prefix stays warm.
 
     Returns:
         A FastAPI application ready to serve.
@@ -570,23 +700,28 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
             `StreamingResponse` emitting one SSE chunk plus a `[DONE]` sentinel
             when `stream` is set.
         """
-        return await asyncio.to_thread(complete, await request.json())
+        return await asyncio.to_thread(complete, await request.json(), request.headers)
 
-    def complete(body: dict) -> JSONResponse | StreamingResponse:
+    def complete(body: dict, headers=None) -> JSONResponse | StreamingResponse:
         """Route, dispatch, and shape one parsed Chat Completions request (sync)."""
         messages = [ChatMessage.model_validate(m) for m in body["messages"]]
         stream = bool(body.get("stream"))
+        session = session_key(body, headers)
 
         t0 = time.perf_counter()
         trajectory = build_trajectory(messages, summary_client, summary_model, summarize_middle)
-        decision = router.route_embedding(embed_text(trajectory))
+        decision = router.route_embedding(
+            embed_text(trajectory), prefer=sticky_arm(session) if sticky else None)
+        remember_arm(session, decision.arm_id)
         t_routed = time.perf_counter()
         tools = [parse_chat_tool(t) for t in (body.get("tools") or [])] or None
-        message, usage = (dispatch_via_openrouter(decision, messages, tools, openrouter_client)
+        message, usage = (dispatch_via_openrouter(decision, messages, tools, openrouter_client,
+                                                  cache=cache, ttl=cache_ttl, session=session)
                           if openrouter_client
                           else dispatch(decision, messages, tools,
                                         cast(openai.OpenAI, openai_client),
-                                        cast(anthropic.Anthropic, anthropic_client)))
+                                        cast(anthropic.Anthropic, anthropic_client),
+                                        cache=cache, ttl=cache_ttl, session=session))
         t_done = time.perf_counter()
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -596,7 +731,9 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
                if provider_s > 0 and usage.completion_tokens else None)
         logger.info(f"routed -> {decision.model}@{decision.effort or 'default'}  "
                     f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
+                    f"sticky={decision.sticky_held} "
                     f"({len(messages)} messages in, traj={len(trajectory)}ch) | "
+                    f"cache r/w {usage.cache_read}/{usage.cache_write} | "
                     f"routing {t_routed - t0:.2f}s, provider {provider_s:.1f}s, "
                     f"{tps or '-'} tps")
         finish_reason = "tool_calls" if message.tool_calls else "stop"
@@ -606,18 +743,25 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
         cost = est_cost_usd(decision.model, usage)
         # Savings vs the always-strongest-arm baseline, priced on THIS request's
         # token counts -- the standard counterfactual (the baseline model would
-        # produce somewhat different output lengths).
+        # produce somewhat different output lengths). Both sides now price cache
+        # reads and writes from the reported split, so the figure is smaller, and
+        # honest: the baseline arm would have been cached too.
         baseline = est_cost_usd(router.arm_spec[router.arms[router.fallback]].model, usage)
         capture("request_routed", {
             "model": decision.model, "effort": decision.effort,
             "p_solve": round(decision.p_solve, 3),
             "off_distribution": decision.off_distribution,
             "fallback_used": decision.fallback_used,
+            "sticky_held": decision.sticky_held,
             "via": "openrouter" if openrouter_client else "direct",
             "stream": stream, "n_messages": len(messages),
             "trajectory_chars": len(trajectory),
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
+            # Counts only. The session key they belong to is user-derived and never
+            # leaves this process.
+            "cache_read_tokens": usage.cache_read,
+            "cache_write_tokens": usage.cache_write,
             "routing_s": round(t_routed - t0, 3), "provider_s": round(provider_s, 3),
             # Upstream dispatch is non-streaming, so first token == full response;
             # ttft gets its own honest meaning if/when passthrough streaming lands.
@@ -675,8 +819,25 @@ def print_opencode_config(port: int) -> None:
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
+def openrouter_base_url() -> str:
+    """Where `--via=openrouter` should send requests.
+
+    OpenRouter's dialect is spoken by every self-hosted gateway (LiteLLM and
+    friends), and pointing at one is how you route through credentials you
+    already hold, or test without an OpenRouter account at all. Hardcoding the
+    URL made that impossible, so `OPENROUTER_BASE_URL` in the environment or in
+    `.env.local` overrides it.
+
+    Returns:
+        The configured base URL, or OpenRouter's own.
+    """
+    load_env(ENV_FILE)
+    return os.environ.get("OPENROUTER_BASE_URL") or OPENROUTER_BASE_URL
+
+
 def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct",
-         summarize: bool = True, summary_model: str = SUMMARY_MODEL) -> None:
+         summarize: bool = True, summary_model: str = SUMMARY_MODEL,
+         cache: bool = True, cache_ttl: str | None = None, sticky: bool = True) -> None:
     """Start the router-proxy server.
 
     Routing runs fully locally (in-process embeddings + kNN over the artifact); API
@@ -693,6 +854,16 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
             when a conversation outgrows the embedding budget. `--nosummarize` falls
             back to embedding just the task anchor + most recent messages.
         summary_model: Model used for those summaries.
+        cache: Drive provider prompt caching -- breakpoints on Anthropic, the
+            request-level directive via OpenRouter, `prompt_cache_key` on OpenAI.
+            `--nocache` sends none of it.
+        cache_ttl: Ask for a longer cache lifetime, e.g. "1h". Anthropic bills a 1h
+            write at 2x input instead of 1.25x, so it pays off only across a session
+            longer than the 5-minute default.
+        sticky: Keep a session on the arm it chose first, while that arm still meets
+            the artifact's own bar, so its cached prefix survives. `--nosticky`
+            restores per-turn re-decision (and reproduces the artifact's certified
+            selection rule exactly).
     """
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
     # Root at INFO unmutes httpx's per-request "HTTP Request: ..." records (the
@@ -701,12 +872,15 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
 
     openai_client = anthropic_client = openrouter_client = None
     if via == "openrouter":
+        base_url = openrouter_base_url()
+        if base_url != OPENROUTER_BASE_URL:
+            logger.info(f"openrouter dialect via gateway: {base_url}")
         openrouter_key = ensure_key("OPENROUTER_API_KEY", "https://openrouter.ai/keys",
-                                    lambda k: openai.OpenAI(api_key=k, base_url=OPENROUTER_BASE_URL)
+                                    lambda k: openai.OpenAI(api_key=k, base_url=base_url)
                                     .chat.completions.create(
                                         model="openai/gpt-4o-mini",
                                         messages=[{"role": "user", "content": "hi"}], max_tokens=1))
-        openrouter_client = openai.OpenAI(api_key=openrouter_key, base_url=OPENROUTER_BASE_URL)
+        openrouter_client = openai.OpenAI(api_key=openrouter_key, base_url=base_url)
         if "/" not in summary_model:
             summary_model = f"openai/{summary_model}"  # OpenRouter namespaces models
     else:
@@ -721,9 +895,11 @@ def main(port: int = 61890, artifact_dir: str | None = None, via: str = "direct"
     ensure_artifact(art_dir)
     router = load_router(art_dir)
     app = make_app(router, openai_client, anthropic_client, openrouter_client,
-                   summary_model=summary_model, summarize_middle=summarize)
+                   summary_model=summary_model, summarize_middle=summarize,
+                   cache=cache, cache_ttl=cache_ttl, sticky=sticky)
     logger.info(f"ready: {len(router.arms)} arms, {router.rule}, via={via}, "
-                f"summarize={summarize}")
+                f"summarize={summarize}, cache={cache}"
+                f"{'/' + cache_ttl if cache_ttl else ''}, sticky={sticky}")
 
     if telemetry_enabled():
         start_telemetry()

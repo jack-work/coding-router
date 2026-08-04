@@ -13,7 +13,7 @@ import logging
 import pathlib
 import platform
 import sys
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
@@ -76,6 +76,99 @@ NO_EFFORT_PARAM = {"claude-haiku-4-5"}
 # OpenAI effort values accepted today; 'minimal' was removed (measured: 400).
 OPENAI_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+# ============================================================================ prompt caching
+# Providers split two ways: some cache any stable prefix implicitly and take no
+# request-side signal at all; others cache only what a `cache_control` breakpoint
+# marks. Source: OpenRouter's prompt-caching guide, read 2026-08-03 -- explicit
+# for Anthropic and Alibaba Qwen, implicit for OpenAI, Gemini, DeepSeek, Grok,
+# Moonshot, Groq and Z.AI.
+CacheStyle = Literal["explicit", "automatic", "none"]
+
+CACHE_EXPLICIT_PROVIDERS = frozenset({"anthropic"})
+
+# Anthropic rejects a request carrying more than four cache_control blocks with
+# HTTP 400, so this is a cap to enforce rather than a guideline. A gateway that
+# adds its own breakpoints must count the client's first and top up to this.
+MAX_CACHE_BREAKPOINTS = 4
+
+# Minimum cacheable prompt length, in tokens. Below it the provider ignores a
+# breakpoint entirely (it is not an error, nothing is written and nothing is
+# billed), so stamping one only burns a slot. Values from Anthropic's cache
+# limitations table via OpenRouter, read 2026-08-03.
+CACHE_MIN_TOKENS_DEFAULT = 1024
+CACHE_MIN_TOKENS: dict[str, int] = {
+    "claude-haiku-4-5": 4096,
+    "claude-opus-4-8": 4096,
+    "claude-opus-5": 4096,
+    # Unlisted upstream; priced above opus, so assume the opus family's floor.
+    # Guessing high only costs a skipped breakpoint on a short prompt.
+    "claude-fable-5": 4096,
+}
+
+# Rough token estimate for the minimum check only. The exact count is the
+# provider's business and we would have to tokenize the whole prompt to know it;
+# 4 chars/token is the same heuristic the trajectory budget already uses.
+CHARS_PER_TOKEN = 4
+
+
+class CachePolicy(BaseModel):
+    """How one arm's provider wants prompt caching driven."""
+
+    model_config = ConfigDict(frozen=True)
+
+    style: CacheStyle
+    min_tokens: int
+    max_breakpoints: int = MAX_CACHE_BREAKPOINTS
+    ttl: str | None = None      # None -> the provider default (5m); "1h" costs 2x on write
+
+    def worth_marking(self, chars: int) -> bool:
+        """Whether a prompt of `chars` characters is long enough to be worth a breakpoint.
+
+        Args:
+            chars: Total characters in the prompt about to be sent.
+
+        Returns:
+            True when this provider needs explicit marks AND the prompt plausibly
+            clears its minimum cacheable length.
+        """
+        return self.style == "explicit" and chars // CHARS_PER_TOKEN >= self.min_tokens
+
+
+def cache_policy(provider: str, model: str, *, ttl: str | None = None) -> CachePolicy:
+    """Resolve the prompt-cache policy for one provider/model pair.
+
+    Args:
+        provider: Provider key, e.g. "anthropic".
+        model: Provider model id, e.g. "claude-sonnet-4-6".
+        ttl: Requested cache lifetime ("1h"), or None for the provider default.
+
+    Returns:
+        The `CachePolicy` describing how (and whether) to mark this request.
+    """
+    style: CacheStyle = "explicit" if provider in CACHE_EXPLICIT_PROVIDERS else "automatic"
+    return CachePolicy(style=style,
+                       min_tokens=CACHE_MIN_TOKENS.get(model, CACHE_MIN_TOKENS_DEFAULT),
+                       ttl=ttl)
+
+
+# ============================================================================ stickiness
+# A router that re-decides every turn destroys the prefix cache: the cache lives
+# per (provider, model, exact prefix), so switching arms mid-conversation turns
+# every 0.1x cache read back into a 1.0x uncached read plus a 1.25x write. The
+# incumbent arm is therefore kept while it still satisfies the artifact's own
+# criterion -- above tau for the kNN kind, within STICKY_MARGIN of the best
+# utility for the trained kind. Escalation (off-distribution, fallback) always
+# overrides stickiness: it can cost money, never accuracy.
+#
+# Precedent: OpenRouter's Auto Router pins the resolved MODEL, not just the
+# provider, for the lifetime of a session, for exactly this reason.
+#
+# For the trained kind this is a bounded deviation from the argmax-utility rule
+# EXP-012 certified. Pass prefer=None (serve's --nosticky) to reproduce those
+# numbers exactly.
+STICKY_MARGIN = 0.02
 
 
 class Arm(BaseModel):
@@ -168,6 +261,7 @@ class Decision(BaseModel):
     nearest_sim: float          # cosine similarity to the closest labelled task
     off_distribution: bool      # True when no neighbour is close enough to trust
     fallback_used: bool         # True when no arm cleared the threshold
+    sticky_held: bool = False   # True when the incumbent arm was kept for cache continuity
     # Provider-varying shape, same reasoning as ArmSpec.request_kwargs above.
     request_kwargs: dict[str, Any]
 
@@ -224,6 +318,7 @@ class Router:
             fallback = int(np.argmax(resolved.mean(axis=1)))
         self.arms = arms
         self.arm_spec: dict[str, ArmSpec] = arm_spec
+        self._index = {a: i for i, a in enumerate(arms)}
         self.k: int = meta["k"]
         self.tau: float = meta["tau"]
         self.sim_floor: float = meta["sim_floor"]
@@ -254,11 +349,14 @@ class Router:
         w = np.clip(sims[nn], 0, None) + 1e-6
         return (self.resolved[:, nn] * w).sum(axis=1) / w.sum(), float(sims[nn[0]])
 
-    def route_embedding(self, v: np.ndarray) -> Decision:
+    def route_embedding(self, v: np.ndarray, *, prefer: str | None = None) -> Decision:
         """Route from a pre-computed, L2-normalised embedding of the task text.
 
         Args:
             v: The task embedding. Normalised internally if not already unit-length.
+            prefer: Arm id chosen earlier in this session. Kept when it still clears
+                `tau` -- the rule's own acceptance criterion -- so the provider's
+                prefix cache survives the turn. See the stickiness note above.
 
         Returns:
             The routing `Decision`: chosen arm, predicted odds, and request kwargs.
@@ -272,23 +370,27 @@ class Router:
             raise ValueError("zero embedding")
         v = v / n
         p, nearest = self._probs(v)
-        pick, fb = None, False
-        for i in self._order:
-            if p[i] >= self.tau:
-                pick = int(i)
-                break
+        pick, fb, sticky = None, False, False
+        incumbent = self._index.get(prefer) if prefer is not None else None
+        if incumbent is not None and p[incumbent] >= self.tau:
+            pick, sticky = incumbent, True
+        if pick is None:
+            for i in self._order:
+                if p[i] >= self.tau:
+                    pick = int(i)
+                    break
         if pick is None:                       # nothing clears the bar -> strongest arm
             pick, fb = self.fallback, True
         # Off-distribution: no labelled task is close enough for the vote to mean much.
         # Escalate rather than trust it -- escalation can only cost money, not accuracy.
         off = nearest < self.sim_floor
         if off:
-            pick, fb = self.fallback, True
+            pick, fb, sticky = self.fallback, True, False
         spec = self.arm_spec[self.arms[pick]]
         return Decision(model=spec.model, effort=spec.effort,
                         arm_id=self.arms[pick], p_solve=float(p[pick]),
                         est_cost_usd=float(self.med_cost[pick]), nearest_sim=nearest,
-                        off_distribution=off, fallback_used=fb,
+                        off_distribution=off, fallback_used=fb, sticky_held=sticky,
                         request_kwargs=spec.request_kwargs)
 
 
@@ -346,6 +448,7 @@ class TrainedRouter:
             fallback = int(np.argmax(graded.mean(axis=1)))
         self.arms = arms
         self.arm_spec: dict[str, ArmSpec] = arm_spec
+        self._index = {a: i for i, a in enumerate(arms)}
         self.T: float = meta["T"]                # trained soft-vote temperature
         self.lam: float = meta["lam"]            # selected cost weight in the utility
         self.sim_floor: float = meta["sim_floor"]
@@ -378,11 +481,14 @@ class TrainedRouter:
         return (str(self._dir / self.meta["embed_model_mlx"]),
                 str(self._dir / self.meta["embed_model_torch"]))
 
-    def route_embedding(self, v: np.ndarray) -> Decision:
+    def route_embedding(self, v: np.ndarray, *, prefer: str | None = None) -> Decision:
         """Route from a pre-computed embedding in the TUNED encoder's vector space.
 
         Args:
             v: The task embedding. Normalised internally if not already unit-length.
+            prefer: Arm id chosen earlier in this session, kept when its utility is
+                within `STICKY_MARGIN` of the best. This is a bounded deviation from
+                the argmax rule EXP-012 certified; pass None to reproduce it exactly.
 
         Returns:
             The routing `Decision`: chosen arm, predicted odds, and request kwargs.
@@ -399,16 +505,21 @@ class TrainedRouter:
         nearest = float(sims.max())
         w = np.exp((sims - sims.max()) / self.T)
         p = self.graded @ (w / w.sum())          # per-arm expected graded = P(solve)
-        pick = int(np.argmax(p - self.lam * self.med_cost))
+        u = p - self.lam * self.med_cost
+        pick = int(np.argmax(u))
+        sticky = False
+        incumbent = self._index.get(prefer) if prefer is not None else None
+        if incumbent is not None and u[incumbent] >= u[pick] - STICKY_MARGIN:
+            pick, sticky = incumbent, True
         off = nearest < self.sim_floor
         fb = off
         if off:
-            pick = self.fallback
+            pick, sticky = self.fallback, False
         spec = self.arm_spec[self.arms[pick]]
         return Decision(model=spec.model, effort=spec.effort,
                         arm_id=self.arms[pick], p_solve=float(p[pick]),
                         est_cost_usd=float(self.med_cost[pick]), nearest_sim=nearest,
-                        off_distribution=off, fallback_used=fb,
+                        off_distribution=off, fallback_used=fb, sticky_held=sticky,
                         request_kwargs=spec.request_kwargs)
 
 
