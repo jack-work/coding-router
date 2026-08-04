@@ -88,15 +88,68 @@ class ToolCall(BaseModel):
     function: FunctionCall
 
 
+class CacheControl(BaseModel):
+    """A prompt-cache breakpoint marker on one content block."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = "ephemeral"
+    ttl: str | None = None    # "5m" (default when absent) or "1h"
+
+
+class ContentPart(BaseModel):
+    """One structured content block of a Chat Completions message.
+
+    Clients that mark cache breakpoints MUST send block lists rather than a bare
+    string: a string has nowhere to hang a `cache_control` marker.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = "text"
+    text: str | None = None
+    cache_control: CacheControl | None = None
+
+
 class ChatMessage(BaseModel):
     """One Chat Completions conversation message (system/user/assistant/tool)."""
 
     model_config = ConfigDict(extra="allow")
 
     role: str | None = None
-    content: str | None = None
+    # Chat Completions has always permitted structured content, and every
+    # cache-aware client sends it (a marker needs a block to sit on). Typing this
+    # `str` alone made any such request fail validation before it reached routing.
+    content: str | list[ContentPart] | None = None
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
+
+    def text(self) -> str:
+        """Flatten this message's content to plain text for embedding and logging.
+
+        Returns:
+            The concatenated text of every text block, or the bare string content;
+            empty when the message carries no text (a pure tool call, say).
+        """
+        if self.content is None:
+            return ""
+        if isinstance(self.content, str):
+            return self.content
+        return "\n".join(p.text for p in self.content if p.type == "text" and p.text)
+
+    def blocks(self) -> list[ContentPart]:
+        """This message's content as structured parts; a bare string becomes one text part."""
+        if self.content is None:
+            return []
+        if isinstance(self.content, str):
+            return [ContentPart(type="text", text=self.content)] if self.content else []
+        return list(self.content)
+
+    def markers(self) -> int:
+        """Count the inbound `cache_control` breakpoints this message already carries."""
+        if not isinstance(self.content, list):
+            return 0
+        return sum(1 for p in self.content if p.cache_control is not None)
 
 
 class ChatFunctionDef(BaseModel):
@@ -337,20 +390,21 @@ def messages_to_responses_input(messages: list[ChatMessage]) -> tuple[str | None
     system, items = None, []
     for m in messages:
         role = m.role
+        text = m.text()
         if role == "system":
-            system = (system + "\n\n" + m.content) if system else m.content
+            system = (system + "\n\n" + text) if system else text
         elif role == "tool":
             items.append({"type": "function_call_output", "call_id": m.tool_call_id,
-                          "output": m.content or ""})
+                          "output": text})
         elif role == "assistant" and m.tool_calls:
             for tc in m.tool_calls:
                 items.append({"type": "function_call", "call_id": tc.id,
                               "name": tc.function.name,
                               "arguments": tc.function.arguments})
-            if m.content:
-                items.append({"role": "assistant", "content": m.content})
+            if text:
+                items.append({"role": "assistant", "content": text})
         else:
-            items.append({"role": role, "content": m.content or ""})
+            items.append({"role": role, "content": text})
     return system, items
 
 
@@ -404,25 +458,26 @@ def messages_to_anthropic(messages: list[ChatMessage]) -> tuple[str | None, list
     system, out = None, []
     for m in messages:
         role = m.role
+        text = m.text()
         if role == "system":
-            system = (system + "\n\n" + m.content) if system else m.content
+            system = (system + "\n\n" + text) if system else text
         elif role == "tool":
             block = {"type": "tool_result", "tool_use_id": m.tool_call_id,
-                     "content": m.content or ""}
+                     "content": text}
             if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
                 out[-1]["content"].append(block)
             else:
                 out.append({"role": "user", "content": [block]})
         elif role == "assistant" and m.tool_calls:
             content = []
-            if m.content:
-                content.append({"type": "text", "text": m.content})
+            if text:
+                content.append({"type": "text", "text": text})
             for tc in m.tool_calls:
                 content.append({"type": "tool_use", "id": tc.id, "name": tc.function.name,
                                 "input": json.loads(tc.function.arguments or "{}")})
             out.append({"role": "assistant", "content": content})
         else:
-            out.append({"role": role, "content": m.content or ""})
+            out.append({"role": role, "content": text})
     return system, out
 
 
@@ -541,9 +596,10 @@ def message_preview(m: ChatMessage) -> str:
     they matched the wrapper, not the task. Other roles keep a role tag so multi-turn
     structure survives.
     """
-    if m.role == "user" and m.content:
-        return m.content[:2000]
-    payload = m.content or ([tc.model_dump() for tc in m.tool_calls] if m.tool_calls else None)
+    text = m.text()
+    if m.role == "user" and text:
+        return text[:2000]
+    payload = text or ([tc.model_dump() for tc in m.tool_calls] if m.tool_calls else None)
     return f"[{m.role}] {json.dumps(payload)[:2000]}"
 
 
