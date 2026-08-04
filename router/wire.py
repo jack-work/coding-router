@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Iterator
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from router.router_core import CachePolicy
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------- Chat Completions shapes
@@ -53,6 +56,19 @@ class CacheControl(BaseModel):
     ttl: str | None = None    # "5m" (default when absent) or "1h"
 
 
+class ImageUrl(BaseModel):
+    """The `image_url` payload of a Chat Completions image part.
+
+    Chat Completions nests the location in an object; the Responses API takes the
+    same string bare, with `detail` beside it rather than inside it.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    url: str = ""
+    detail: str | None = None
+
+
 class ContentPart(BaseModel):
     """One structured content block of a Chat Completions message.
 
@@ -64,6 +80,7 @@ class ContentPart(BaseModel):
 
     type: str = "text"
     text: str | None = None
+    image_url: ImageUrl | None = None
     cache_control: CacheControl | None = None
 
 
@@ -431,6 +448,87 @@ class ModelList(BaseModel):
 
 # ---------------------------------------------------------------- Chat Completions -> OpenAI Responses
 
+# Media types Anthropic accepts on an image block (its vision guide, read
+# 2026-08-04): image/jpeg, image/png, image/gif, image/webp. A data: URI naming
+# anything else is refused by the provider, so it is dropped here with a warning
+# rather than sent and rejected.
+ANTHROPIC_IMAGE_MEDIA = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+
+def _image_source(url: str) -> dict[str, str] | None:
+    """Build Anthropic's image `source` from a Chat Completions image URL.
+
+    Args:
+        url: Either a `data:` URI carrying base64 image bytes, or a remote URL.
+
+    Returns:
+        The `source` object, or None when the URL is empty or names a media type
+        Anthropic does not accept.
+    """
+    if not url:
+        return None
+    if not url.startswith("data:"):
+        return {"type": "url", "url": url}
+    header, _, data = url.partition(",")
+    media = header[len("data:"):].split(";")[0]
+    if media not in ANTHROPIC_IMAGE_MEDIA or not data:
+        logger.warning(f"image: dropping data URI with unusable media type {media!r}")
+        return None
+    return {"type": "base64", "media_type": media, "data": data}
+
+
+def to_anthropic_block(part: ContentPart) -> dict[str, Any] | None:
+    """Translate one Chat Completions content block into its Anthropic shape.
+
+    Returns None for anything this translation does not know, so an unrecognised
+    block is dropped with a warning rather than sent in a shape the provider
+    would reject.
+    """
+    cc: dict[str, Any] = ({"cache_control": part.cache_control.model_dump(exclude_none=True)}
+                          if part.cache_control else {})
+    if part.type == "text":
+        return {"type": "text", "text": part.text or "", **cc}
+    if part.type == "image_url":
+        source = _image_source(part.image_url.url if part.image_url else "")
+        return {"type": "image", "source": source, **cc} if source else None
+    logger.warning(f"image: dropping unsupported content block {part.type!r} for anthropic")
+    return None
+
+
+def to_responses_block(part: ContentPart, marker: str | None = None) -> dict[str, Any] | None:
+    """Translate one Chat Completions content block into its Responses API shape.
+
+    The Responses API takes the image location as a bare string with `detail`
+    beside it, where Chat Completions nests both inside an `image_url` object.
+    """
+    if part.type == "text":
+        block: dict[str, Any] = {"type": "input_text", "text": part.text or ""}
+        if marker and part.cache_control:
+            block[marker] = {"mode": "explicit"}
+        return block
+    if part.type == "image_url":
+        if not (part.image_url and part.image_url.url):
+            return None
+        block = {"type": "input_image", "image_url": part.image_url.url}
+        if part.image_url.detail:
+            block["detail"] = part.image_url.detail
+        return block
+    logger.warning(f"image: dropping unsupported content block {part.type!r} for openai")
+    return None
+
+
+def needs_blocks(m: ChatMessage, *, marks_apply: bool = True) -> bool:
+    """Whether this message must be forwarded as blocks rather than flattened.
+
+    A non-text block is content, and flattening drops it outright. A cache
+    breakpoint only needs the block form where the provider can act on it;
+    forcing it elsewhere would reshape the request to carry a hint that provider
+    discards.
+    """
+    return any(b.type != "text" or (marks_apply and b.cache_control is not None)
+               for b in m.blocks())
+
+
 def messages_to_responses_input(messages: list[ChatMessage],
                                 policy: CachePolicy | None = None,
                                 ) -> tuple[str | None, list[dict]]:
@@ -457,12 +555,13 @@ def messages_to_responses_input(messages: list[ChatMessage],
     for m in messages:
         role = m.role
         text = m.text()
-        if keep_marks and role not in ("system", "tool") and not m.tool_calls and m.markers():
-            marked_positions.append(len(items))
-            items.append({"role": role, "content": [
-                {"type": "input_text", "text": b.text or "",
-                 **({marker: {"mode": "explicit"}} if b.cache_control else {})}
-                for b in m.blocks() if b.type == "text"]})
+        if (role not in ("system", "tool") and not m.tool_calls
+                and needs_blocks(m, marks_apply=keep_marks)):
+            if keep_marks and m.markers():
+                marked_positions.append(len(items))
+            native = [b for b in (to_responses_block(p, marker if keep_marks else None)
+                                  for p in m.blocks()) if b]
+            items.append({"role": role, "content": native or text})
             continue
         if role == "system":
             system = (system + "\n\n" + text) if system else text
@@ -587,11 +686,13 @@ def messages_to_anthropic(messages: list[ChatMessage]) -> tuple[str | None, list
                 content.append({"type": "tool_use", "id": tc.id, "name": tc.function.name,
                                 "input": json.loads(tc.function.arguments or "{}")})
             out.append({"role": "assistant", "content": content})
-        elif m.markers():
-            # The client marked breakpoints on these blocks; forward them as blocks
-            # so the markers survive, instead of flattening them away.
-            out.append({"role": role, "content":
-                        [b.model_dump(exclude_none=True) for b in m.blocks()]})
+        elif needs_blocks(m):
+            # Images and cache breakpoints do not survive flattening, so this
+            # message is translated block by block instead. Dumping the inbound
+            # blocks raw would send Chat Completions shapes to a provider that
+            # does not speak them.
+            native = [b for b in (to_anthropic_block(p) for p in m.blocks()) if b]
+            out.append({"role": role, "content": native or text})
         else:
             out.append({"role": role, "content": text})
     return system, out
