@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import anthropic
@@ -46,19 +46,25 @@ from router.wire import (
     ChatMessage,
     ChatTool,
     Choice,
+    FunctionCall,
     ModelCard,
     ModelList,
     PromptTokensDetails,
+    StreamDelta,
     TokenUsage,
+    ToolCall,
     anthropic_response_to_message,
+    collect,
     mark_anthropic_cache,
     messages_to_anthropic,
     messages_to_responses_input,
     parse_chat_tool,
     responses_output_to_message,
-    sse_stream,
+    sse_passthrough,
     tools_to_anthropic,
     tools_to_responses,
+    usage_from_chat,
+    usage_from_responses,
     wants_usage,
 )
 
@@ -292,8 +298,13 @@ def est_cost_usd(model: str, usage: TokenUsage) -> float | None:
 def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTool] | None,
             openai_client: openai.OpenAI, anthropic_client: anthropic.Anthropic,
             *, cache: bool = True, ttl: str | None = None, session: str | None = None,
-            ) -> tuple[ChatMessage, TokenUsage]:
-    """Call the real provider for a routed decision and return the reply plus token usage.
+            stream: bool = True) -> Iterator[StreamDelta]:
+    """Stream one routed decision from its real provider, delta by delta.
+
+    Dispatch is streaming-native in both directions: the provider is always asked
+    to stream, and a non-streaming client is served by draining this with
+    `wire.collect()`. One code path to the provider means the streaming and
+    buffered responses can never disagree about what was said.
 
     Args:
         decision: A `router_core.Decision` naming the chosen arm.
@@ -305,11 +316,14 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
         ttl: Cache lifetime to request, e.g. "1h"; None means the provider default.
         session: Stable session key, sent to OpenAI as `prompt_cache_key` so repeat
             turns land on the machine holding the warm prefix.
+        stream: Ask the provider to stream. Set only when the CLIENT asked to stream:
+            some gateways omit the cache split from streamed usage, so a buffered
+            client must not pay for a transport it did not request.
 
-    Returns:
-        The provider's reply as a Chat Completions `ChatMessage`, and its `TokenUsage`
-        (prompt tokens include cache reads/writes so counts are comparable across
-        providers -- Anthropic reports those separately, OpenAI folds them in).
+    Yields:
+        `StreamDelta`s carrying text, tool calls, and finally token usage (whose
+        prompt count includes cache reads and writes, so counts stay comparable
+        across providers -- Anthropic reports those separately, OpenAI folds them in).
     """
     provider = "anthropic" if decision.model.startswith("claude") else "openai"
     policy = cache_policy(provider, decision.model, ttl=ttl)
@@ -320,52 +334,77 @@ def dispatch(decision: Decision, messages: list[ChatMessage], tools: list[ChatTo
         if cache and policy.worth_marking(prompt_chars(system, messages)):
             mark_anthropic_cache(system_blocks, anthropic_tools, anthropic_messages, policy)
         kwargs = {"system": system_blocks} if system_blocks else {}
-        # Anthropic requires streaming for requests that might run long at this
-        # max_tokens; .stream() avoids that restriction and still returns one
-        # complete message via get_final_message(), same as .create() would.
         with anthropic_client.messages.stream(
                 messages=anthropic_messages, max_tokens=DISPATCH_MAX_TOKENS,
-                tools=anthropic_tools, **kwargs, **decision.request_kwargs) as stream:
-            r = stream.get_final_message()
+                tools=anthropic_tools, **kwargs, **decision.request_kwargs) as events:
+            if stream:
+                for event in events:
+                    if (getattr(event, "type", None) == "content_block_delta"
+                            and getattr(event.delta, "type", None) == "text_delta"):
+                        yield StreamDelta(text=event.delta.text)
+            # Tool calls arrive as input_json_delta fragments that are only valid
+            # JSON once complete, so they are taken from the assembled message
+            # rather than forwarded piecemeal.
+            r = events.get_final_message()
+        message = anthropic_response_to_message(r.content)
+        if not stream and message.content:
+            yield StreamDelta(text=message.content)
         read = getattr(r.usage, "cache_read_input_tokens", 0) or 0
         write = getattr(r.usage, "cache_creation_input_tokens", 0) or 0
         prompt = r.usage.input_tokens + read + write
-        usage = TokenUsage(prompt_tokens=prompt, completion_tokens=r.usage.output_tokens,
-                           total_tokens=prompt + r.usage.output_tokens,
-                           prompt_tokens_details=PromptTokensDetails(
-                               cached_tokens=read, cache_write_tokens=write))
-        return anthropic_response_to_message(r.content), usage
+        if message.tool_calls:
+            yield StreamDelta(tool_calls=message.tool_calls)
+        yield StreamDelta(usage=TokenUsage(
+            prompt_tokens=prompt, completion_tokens=r.usage.output_tokens,
+            total_tokens=prompt + r.usage.output_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=read,
+                                                      cache_write_tokens=write)))
+        return
 
     system, input_items = messages_to_responses_input(messages)
     # OpenAI caches implicitly; the only lever is routing repeat turns to the machine
     # that holds the prefix, which is what prompt_cache_key pins.
     extra = {"prompt_cache_key": session} if (cache and session) else {}
-    r = openai_client.responses.create(
-        instructions=system, input=input_items, max_output_tokens=DISPATCH_MAX_TOKENS,
-        tools=tools_to_responses(tools), **extra, **decision.request_kwargs)
-    details = getattr(r.usage, "input_tokens_details", None)
-    usage = TokenUsage(prompt_tokens=getattr(r.usage, "input_tokens", 0) or 0,
-                       completion_tokens=getattr(r.usage, "output_tokens", 0) or 0,
-                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0,
-                       prompt_tokens_details=PromptTokensDetails(
-                           cached_tokens=getattr(details, "cached_tokens", 0) or 0,
-                           cache_write_tokens=getattr(details, "cache_write_tokens", 0) or 0))
-    return responses_output_to_message(r.output), usage
+    call = dict(instructions=system, input=input_items,
+                max_output_tokens=DISPATCH_MAX_TOKENS, tools=tools_to_responses(tools),
+                **extra, **decision.request_kwargs)
+    if not stream:
+        r = openai_client.responses.create(**call)
+        buffered = responses_output_to_message(r.output)
+        if buffered.content:
+            yield StreamDelta(text=buffered.content)
+        if buffered.tool_calls:
+            yield StreamDelta(tool_calls=buffered.tool_calls)
+        yield StreamDelta(usage=usage_from_responses(getattr(r, "usage", None)))
+        return
+    for event in openai_client.responses.create(stream=True, **call):
+        etype = getattr(event, "type", "")
+        if etype == "response.output_text.delta":
+            yield StreamDelta(text=event.delta)
+        elif etype == "response.output_item.done":
+            item = getattr(event, "item", None)
+            if item is not None and getattr(item, "type", None) == "function_call":
+                yield StreamDelta(tool_calls=[ToolCall(
+                    id=item.call_id,
+                    function=FunctionCall(name=item.name, arguments=item.arguments))])
+        elif etype == "response.completed":
+            yield StreamDelta(usage=usage_from_responses(
+                getattr(event.response, "usage", None)))
 
 
 def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
                             tools: list[ChatTool] | None, client: openai.OpenAI,
                             *, cache: bool = True, ttl: str | None = None,
-                            session: str | None = None,
-                            ) -> tuple[ChatMessage, TokenUsage]:
-    """Call the routed model through OpenRouter instead of the provider directly.
+                            session: str | None = None, stream: bool = True,
+                            ) -> Iterator[StreamDelta]:
+    """Stream the routed model through OpenRouter instead of the provider directly.
 
     OpenRouter speaks the same Chat Completions dialect the incoming request already
     uses, so no format translation is needed -- only the model id gets a provider
     prefix and the request goes to a different base_url. Messages/tools are
     re-serialized back to plain dicts for the SDK call, keeping any fields our own
-    models don't declare (via `extra="allow"` above), which is what carries a
-    client's own `cache_control` markers through untouched.
+    models don't declare (via `extra="allow"`), which is what carries a client's own
+    `cache_control` markers through untouched.
 
     Caching is driven with OpenRouter's request-level directive rather than by
     placing breakpoints here: it advances the breakpoint through the conversation
@@ -381,9 +420,10 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
         cache: Whether to drive prompt caching at all.
         ttl: Cache lifetime to request, e.g. "1h"; None means the provider default.
         session: Stable session key for sticky routing (<=256 chars).
+        stream: Ask the gateway to stream; see `dispatch` for why it follows the client.
 
-    Returns:
-        The provider's reply as a Chat Completions `ChatMessage`, and its `TokenUsage`.
+    Yields:
+        `StreamDelta`s carrying text, tool calls, and finally token usage.
     """
     family = "anthropic" if decision.model.startswith("claude") else "openai"
     raw_messages = [m.model_dump(exclude_none=True) for m in messages]
@@ -398,17 +438,48 @@ def dispatch_via_openrouter(decision: Decision, messages: list[ChatMessage],
             body["cache_control"] = cc
         if session:
             body["session_id"] = session[:SESSION_KEY_MAX]
-    r = client.chat.completions.create(
-        model=f"{family}/{decision.model}", messages=raw_messages, tools=raw_tools,
-        extra_body=body or None)
-    details = getattr(r.usage, "prompt_tokens_details", None)
-    usage = TokenUsage(prompt_tokens=getattr(r.usage, "prompt_tokens", 0) or 0,
-                       completion_tokens=getattr(r.usage, "completion_tokens", 0) or 0,
-                       total_tokens=getattr(r.usage, "total_tokens", 0) or 0,
-                       prompt_tokens_details=PromptTokensDetails(
-                           cached_tokens=getattr(details, "cached_tokens", 0) or 0,
-                           cache_write_tokens=getattr(details, "cache_write_tokens", 0) or 0))
-    return ChatMessage.model_validate(r.choices[0].message.model_dump(exclude_none=True)), usage
+    # Usage only rides along a stream when it is asked for, and without it every
+    # bucket reads zero however much was really spent.
+    call = dict(model=f"{family}/{decision.model}", messages=raw_messages,
+                tools=raw_tools, max_tokens=DISPATCH_MAX_TOKENS,
+                extra_body=body or None)
+    if not stream:
+        r = client.chat.completions.create(**call)
+        buffered = ChatMessage.model_validate(
+            r.choices[0].message.model_dump(exclude_none=True))
+        if buffered.content:
+            yield StreamDelta(text=str(buffered.content))
+        if buffered.tool_calls:
+            yield StreamDelta(tool_calls=buffered.tool_calls)
+        yield StreamDelta(usage=usage_from_chat(r.usage))
+        return
+    chunks = client.chat.completions.create(
+        stream=True, stream_options={"include_usage": True}, **call)
+    pending: dict[int, ToolCall] = {}
+    for chunk in chunks:
+        u = getattr(chunk, "usage", None)
+        if u is not None:
+            yield StreamDelta(usage=usage_from_chat(u))
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if getattr(delta, "content", None):
+            yield StreamDelta(text=delta.content)
+        # Tool-call arguments arrive as fragments keyed by index, so they are
+        # accumulated here and emitted whole -- a partial argument string is not
+        # valid JSON and a client cannot act on it.
+        for fragment in getattr(delta, "tool_calls", None) or []:
+            slot = pending.setdefault(
+                fragment.index, ToolCall(id=fragment.id or "",
+                                         function=FunctionCall(name="", arguments="")))
+            if fragment.id:
+                slot.id = fragment.id
+            fn = getattr(fragment, "function", None)
+            if fn is not None:
+                slot.function.name += fn.name or ""
+                slot.function.arguments += fn.arguments or ""
+    if pending:
+        yield StreamDelta(tool_calls=[pending[i] for i in sorted(pending)])
 
 
 def message_preview(m: ChatMessage) -> str:
@@ -715,74 +786,108 @@ def make_app(router: Router | TrainedRouter, openai_client: openai.OpenAI | None
         remember_arm(session, decision.arm_id)
         t_routed = time.perf_counter()
         tools = [parse_chat_tool(t) for t in (body.get("tools") or [])] or None
-        message, usage = (dispatch_via_openrouter(decision, messages, tools, openrouter_client,
-                                                  cache=cache, ttl=cache_ttl, session=session)
-                          if openrouter_client
-                          else dispatch(decision, messages, tools,
-                                        cast(openai.OpenAI, openai_client),
-                                        cast(anthropic.Anthropic, anthropic_client),
-                                        cache=cache, ttl=cache_ttl, session=session))
-        t_done = time.perf_counter()
+        deltas = (dispatch_via_openrouter(decision, messages, tools, openrouter_client,
+                                          cache=cache, ttl=cache_ttl, session=session,
+                                          stream=stream)
+                  if openrouter_client
+                  else dispatch(decision, messages, tools,
+                                cast(openai.OpenAI, openai_client),
+                                cast(anthropic.Anthropic, anthropic_client),
+                                cache=cache, ttl=cache_ttl, session=session,
+                                stream=stream))
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
-        provider_s = t_done - t_routed
-        tps = (round(usage.completion_tokens / provider_s, 1)
-               if provider_s > 0 and usage.completion_tokens else None)
-        logger.info(f"routed -> {decision.model}@{decision.effort or 'default'}  "
-                    f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
-                    f"sticky={decision.sticky_held} "
-                    f"({len(messages)} messages in, traj={len(trajectory)}ch) | "
-                    f"cache r/w {usage.cache_read}/{usage.cache_write} | "
-                    f"routing {t_routed - t0:.2f}s, provider {provider_s:.1f}s, "
-                    f"{tps or '-'} tps")
-        finish_reason = "tool_calls" if message.tool_calls else "stop"
+        # Time to FIRST token, not to the last one. It only means anything now that
+        # the provider's output is forwarded as it arrives.
+        timing: dict[str, float] = {}
 
-        # Metadata-only telemetry (see the telemetry section + AGENTS.md): counts,
-        # durations, model ids, and cost estimates -- never any request content.
-        cost = est_cost_usd(decision.model, usage)
-        # Savings vs the always-strongest-arm baseline, priced on THIS request's
-        # token counts -- the standard counterfactual (the baseline model would
-        # produce somewhat different output lengths). Both sides now price cache
-        # reads and writes from the reported split, so the figure is smaller, and
-        # honest: the baseline arm would have been cached too.
-        baseline = est_cost_usd(router.arm_spec[router.arms[router.fallback]].model, usage)
-        capture("request_routed", {
-            "model": decision.model, "effort": decision.effort,
-            "p_solve": round(decision.p_solve, 3),
-            "off_distribution": decision.off_distribution,
-            "fallback_used": decision.fallback_used,
-            "sticky_held": decision.sticky_held,
-            "via": "openrouter" if openrouter_client else "direct",
-            "stream": stream, "n_messages": len(messages),
-            "trajectory_chars": len(trajectory),
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            # Counts only. The session key they belong to is user-derived and never
-            # leaves this process.
-            "cache_read_tokens": usage.cache_read,
-            "cache_write_tokens": usage.cache_write,
-            "routing_s": round(t_routed - t0, 3), "provider_s": round(provider_s, 3),
-            # Upstream dispatch is non-streaming, so first token == full response;
-            # ttft gets its own honest meaning if/when passthrough streaming lands.
-            "ttft_s": round(t_done - t0, 3), "total_s": round(t_done - t0, 3),
-            "tps": tps,
-            "cost_usd": cost, "baseline_cost_usd": baseline,
-            "est_savings_usd": (round(baseline - cost, 6)
-                                if cost is not None and baseline is not None else None),
-        })
+        def timed(source: Iterator[StreamDelta]) -> Iterator[StreamDelta]:
+            """Pass deltas through, recording when the first and last one arrived."""
+            for delta in source:
+                if delta.text or delta.tool_calls:
+                    timing.setdefault("first", time.perf_counter())
+                yield delta
+            timing["last"] = time.perf_counter()
+
+        def report(usage: TokenUsage) -> None:
+            """Log the routed line and capture metadata-only telemetry for this request.
+
+            Runs once the reply is complete: token counts and timings are not known
+            until the provider's stream ends.
+            """
+            t_done = timing.get("last", time.perf_counter())
+            provider_s = t_done - t_routed
+            ttft_s = timing.get("first", t_done) - t0
+            tps = (round(usage.completion_tokens / provider_s, 1)
+                   if provider_s > 0 and usage.completion_tokens else None)
+            logger.info(f"routed -> {decision.model}@{decision.effort or 'default'}  "
+                        f"p_solve={decision.p_solve:.2f} off_dist={decision.off_distribution} "
+                        f"sticky={decision.sticky_held} "
+                        f"({len(messages)} messages in, traj={len(trajectory)}ch) | "
+                        f"cache r/w {usage.cache_read}/{usage.cache_write} | "
+                        f"routing {t_routed - t0:.2f}s, ttft {ttft_s:.2f}s, "
+                        f"provider {provider_s:.1f}s, {tps or '-'} tps")
+
+            # Metadata-only telemetry (see the telemetry section + AGENTS.md): counts,
+            # durations, model ids, and cost estimates -- never any request content.
+            cost = est_cost_usd(decision.model, usage)
+            # Savings vs the always-strongest-arm baseline, priced on THIS request's
+            # token counts -- the standard counterfactual (the baseline model would
+            # produce somewhat different output lengths). Both sides now price cache
+            # reads and writes from the reported split, so the figure is smaller, and
+            # honest: the baseline arm would have been cached too.
+            baseline = est_cost_usd(router.arm_spec[router.arms[router.fallback]].model, usage)
+            capture("request_routed", {
+                "model": decision.model, "effort": decision.effort,
+                "p_solve": round(decision.p_solve, 3),
+                "off_distribution": decision.off_distribution,
+                "fallback_used": decision.fallback_used,
+                "sticky_held": decision.sticky_held,
+                "via": "openrouter" if openrouter_client else "direct",
+                "stream": stream, "n_messages": len(messages),
+                "trajectory_chars": len(trajectory),
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                # Counts only. The session key they belong to is user-derived and never
+                # leaves this process.
+                "cache_read_tokens": usage.cache_read,
+                "cache_write_tokens": usage.cache_write,
+                "routing_s": round(t_routed - t0, 3), "provider_s": round(provider_s, 3),
+                "ttft_s": round(ttft_s, 3), "total_s": round(t_done - t0, 3),
+                "tps": tps,
+                "cost_usd": cost, "baseline_cost_usd": baseline,
+                "est_savings_usd": (round(baseline - cost, 6)
+                                    if cost is not None and baseline is not None else None),
+            })
 
         if not stream:
+            message, usage = collect(timed(deltas))
+            report(usage)
             resp = ChatCompletionResponse(
                 id=completion_id, created=created, model=decision.model,
-                choices=[Choice(index=0, message=message, finish_reason=finish_reason)],
+                choices=[Choice(index=0, message=message,
+                                finish_reason="tool_calls" if message.tool_calls else "stop")],
                 usage=usage)
             return JSONResponse(resp.model_dump(exclude_none=True))
 
-        return StreamingResponse(
-            sse_stream(completion_id, created, decision.model, message, finish_reason,
-                       usage, wants_usage(body)),
-            media_type="text/event-stream")
+        def streamed() -> Iterator[str]:
+            """Forward the provider's output as SSE, then report once it has ended."""
+            seen = TokenUsage()
+
+            def tap(source: Iterator[StreamDelta]) -> Iterator[StreamDelta]:
+                """Remember the usage the provider reported on its way past."""
+                nonlocal seen
+                for delta in source:
+                    if delta.usage is not None:
+                        seen = delta.usage
+                    yield delta
+
+            yield from sse_passthrough(completion_id, created, decision.model,
+                                       tap(timed(deltas)), wants_usage(body))
+            report(seen)
+
+        return StreamingResponse(streamed(), media_type="text/event-stream")
 
     @app.get("/v1/models")
     def models() -> ModelList:

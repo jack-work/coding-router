@@ -114,21 +114,23 @@ built-in "max lines per file" rule, so the 1000-line rule is enforced by this ch
 find router -name "*.py" | xargs wc -l | awk '$1 > 1000 && $2 != "total" {print; exit 1}'
 ```
 
-**ty baseline: 7 known diagnostics, not bugs, don't chase them to zero without asking
+**ty baseline: 10 known diagnostics, not bugs, don't chase them to zero without asking
 first.** Two of them are `unresolved-import` on the Apple-Silicon-only embedding backend
 (`mlx.core`, `mlx_embeddings`) — those packages are never installed on Linux, so a static
-checker there cannot resolve them. The rest are SDK-overload mismatches on
-`Messages.stream`, `Responses.create` and `Completions.create`, plus one `Tensor.astype`.
+checker there cannot resolve them. Most of the rest are the provider SDKs' streaming event
+unions: the code tests `event.type` and then reads the attribute that variant carries,
+which a static checker cannot narrow through. The remainder are SDK overload mismatches
+and one `Tensor.astype`.
 
-This number was 28 before structured content blocks were typed (`ChatMessage.content` is
-now `str | list[ContentPart] | None`, so the string-concatenation gap in the translation
-functions is closed). Note that AGENTS.md previously claimed 27 while `ty` reported 28 at
-the very commit that wrote the claim, and named `sentence_transformers` as an unresolved
-import when both unresolved imports were in fact the mlx pair — measure, don't inherit.
-If this count grows for a new, different reason, treat that as a real signal worth looking
-at. Before changing this number, verify a claimed baseline shift the same way it was
-established here: diff `ty check` output against a stash of the prior state, not just
-eyeball the total.
+This number was 28 before structured content blocks were typed, 7 after, and 10 once
+dispatch became streaming-native. Note that AGENTS.md previously claimed 27 while `ty`
+reported 28 at the very commit that wrote the claim, and named `sentence_transformers` as
+an unresolved import when both unresolved imports were in fact the mlx pair — measure,
+don't inherit. If this count grows for a new, different REASON, treat that as a real signal
+worth looking at; the four categories seen so far are `unresolved-attribute`,
+`unresolved-import`, `no-matching-overload` and `invalid-argument-type`. Before changing
+this number, verify a claimed baseline shift the same way it was established here: diff
+`ty check` output against a stash of the prior state, not just eyeball the total.
 
 ## Config files
 
