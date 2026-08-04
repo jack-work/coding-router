@@ -7,6 +7,7 @@ definition; `serve.py` owns the server, routing, and dispatch that use them.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -210,6 +211,70 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChunkChoice]
+    # Present only on the final chunk, and only when the client asked for it with
+    # stream_options.include_usage. Every other chunk omits it.
+    usage: TokenUsage | None = None
+
+
+class StreamOptions(BaseModel):
+    """The `stream_options` object of a streaming Chat Completions request."""
+
+    model_config = ConfigDict(extra="allow")
+
+    include_usage: bool = False
+
+
+def wants_usage(body: dict) -> bool:
+    """Whether a streaming client asked for a final usage chunk.
+
+    Args:
+        body: The parsed Chat Completions request.
+
+    Returns:
+        True when `stream_options.include_usage` is set.
+    """
+    raw = body.get("stream_options")
+    if not isinstance(raw, dict):
+        return False
+    return StreamOptions.model_validate(raw).include_usage
+
+
+def sse_stream(chunk_id: str, created: int, model: str, message: ChatMessage,
+               finish_reason: str | None, usage: TokenUsage,
+               include_usage: bool) -> Iterator[str]:
+    """Render one completed reply as the SSE lines a Chat Completions client expects.
+
+    Upstream dispatch is not streamed, so the whole reply arrives at once and is
+    emitted as one content chunk plus a finish chunk. When the client set
+    `stream_options.include_usage`, a final chunk carrying `usage` and an EMPTY
+    `choices` list follows, which is where OpenAI puts it and the only place a
+    streaming client will look for token counts.
+
+    Args:
+        chunk_id: The completion id shared by every chunk.
+        created: Unix timestamp shared by every chunk.
+        model: The model that produced the reply.
+        message: The assistant message to deliver.
+        finish_reason: "stop" or "tool_calls".
+        usage: Token counts for the request, including the cache split.
+        include_usage: Whether to emit the final usage chunk.
+
+    Yields:
+        Complete `data: ...` SSE lines, ending with the `[DONE]` sentinel.
+    """
+    head = ChatCompletionChunk(id=chunk_id, created=created, model=model,
+                               choices=[ChunkChoice(index=0, delta=message,
+                                                    finish_reason=None)])
+    yield f"data: {head.model_dump_json(exclude_none=True)}\n\n"
+    tail = ChatCompletionChunk(id=chunk_id, created=created, model=model,
+                               choices=[ChunkChoice(index=0, delta=ChatMessage(),
+                                                    finish_reason=finish_reason)])
+    yield f"data: {tail.model_dump_json(exclude_none=True)}\n\n"
+    if include_usage:
+        final = ChatCompletionChunk(id=chunk_id, created=created, model=model,
+                                    choices=[], usage=usage)
+        yield f"data: {final.model_dump_json(exclude_none=True)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 class ModelCard(BaseModel):
