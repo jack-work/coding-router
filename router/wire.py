@@ -11,6 +11,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from router.router_core import CachePolicy
+
 
 # ---------------------------------------------------------------- Chat Completions shapes
 # These mirror the OpenAI Chat Completions wire format, which is this server's public
@@ -144,12 +146,41 @@ class Choice(BaseModel):
     finish_reason: str | None = None
 
 
+class PromptTokensDetails(BaseModel):
+    """Cache breakdown of the prompt tokens, as OpenAI and OpenRouter report it."""
+
+    model_config = ConfigDict(extra="allow")
+
+    cached_tokens: int = 0        # prompt tokens served from cache (a read)
+    cache_write_tokens: int = 0   # prompt tokens written to cache
+
+
 class TokenUsage(BaseModel):
-    """Token counts for one dispatched request, Chat Completions `usage` shape."""
+    """Token counts for one dispatched request, Chat Completions `usage` shape.
+
+    `prompt_tokens` stays inclusive of cached reads and writes, so it remains
+    comparable across providers; the split lives in `prompt_tokens_details`.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    prompt_tokens_details: PromptTokensDetails | None = None
+
+    @property
+    def cache_read(self) -> int:
+        """Prompt tokens read from cache, or 0 when the provider reported none."""
+        return self.prompt_tokens_details.cached_tokens if self.prompt_tokens_details else 0
+
+    @property
+    def cache_write(self) -> int:
+        """Prompt tokens written to cache, or 0 when the provider reported none."""
+        return self.prompt_tokens_details.cache_write_tokens if self.prompt_tokens_details else 0
+
+    @property
+    def uncached_prompt(self) -> int:
+        """Prompt tokens billed at the full input rate (never negative)."""
+        return max(0, self.prompt_tokens - self.cache_read - self.cache_write)
 
 
 class ChatCompletionResponse(BaseModel):
@@ -269,6 +300,11 @@ def messages_to_anthropic(messages: list[ChatMessage]) -> tuple[str | None, list
     tool_result blocks -- Anthropic requires all results for one assistant turn to
     arrive together, or the model learns to stop making parallel tool calls.
 
+    A client's `cache_control` markers are carried across for every role, so a
+    breakpoint placed deliberately is not flattened away here. System markers are
+    the exception: the system prompt is one string upstream, and `serve.py` stamps
+    the last system block itself.
+
     Args:
         messages: Chat Completions-style message list.
 
@@ -279,11 +315,14 @@ def messages_to_anthropic(messages: list[ChatMessage]) -> tuple[str | None, list
     for m in messages:
         role = m.role
         text = m.text()
+        mark = next((b.cache_control for b in m.blocks() if b.cache_control), None)
         if role == "system":
             system = (system + "\n\n" + text) if system else text
         elif role == "tool":
             block = {"type": "tool_result", "tool_use_id": m.tool_call_id,
                      "content": text}
+            if mark:
+                block["cache_control"] = mark.model_dump(exclude_none=True)
             if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
                 out[-1]["content"].append(block)
             else:
@@ -291,11 +330,19 @@ def messages_to_anthropic(messages: list[ChatMessage]) -> tuple[str | None, list
         elif role == "assistant" and m.tool_calls:
             content = []
             if text:
-                content.append({"type": "text", "text": text})
+                block = {"type": "text", "text": text}
+                if mark:
+                    block["cache_control"] = mark.model_dump(exclude_none=True)
+                content.append(block)
             for tc in m.tool_calls:
                 content.append({"type": "tool_use", "id": tc.id, "name": tc.function.name,
                                 "input": json.loads(tc.function.arguments or "{}")})
             out.append({"role": "assistant", "content": content})
+        elif m.markers():
+            # The client marked breakpoints on these blocks; forward them as blocks
+            # so the markers survive, instead of flattening them away.
+            out.append({"role": role, "content":
+                        [b.model_dump(exclude_none=True) for b in m.blocks()]})
         else:
             out.append({"role": role, "content": text})
     return system, out
@@ -328,3 +375,97 @@ def anthropic_response_to_message(content: list) -> ChatMessage:
                                                              arguments=json.dumps(block.input))))
     return ChatMessage(role="assistant", content="\n".join(text_parts) or None,
                        tool_calls=tool_calls or None)
+
+
+# ---------------------------------------------------------------- cache breakpoints
+
+def count_cache_marks(*regions: list) -> int:
+    """Count `cache_control` markers already present across native request regions.
+
+    Args:
+        *regions: Native block lists (system blocks, tool definitions, messages).
+            Message content that is a plain string carries no marker by definition.
+
+    Returns:
+        The total number of marked blocks.
+    """
+    n = 0
+    for region in regions:
+        for item in region:
+            if not isinstance(item, dict):
+                continue
+            if item.get("cache_control"):
+                n += 1
+            body = item.get("content")
+            if isinstance(body, list):
+                n += sum(1 for b in body if isinstance(b, dict) and b.get("cache_control"))
+    return n
+
+
+def _mark(block: dict, ttl: str | None) -> None:
+    """Stamp one native block with a cache breakpoint.
+
+    `type` is an enum of exactly ["ephemeral"]; a longer lifetime rides in the
+    separate `ttl` field, so 1h is {"type": "ephemeral", "ttl": "1h"}.
+    """
+    cc: dict[str, str] = {"type": "ephemeral"}
+    if ttl:
+        cc["ttl"] = ttl
+    block["cache_control"] = cc
+
+
+def _tail_block(messages: list[dict]) -> dict | None:
+    """The block that should carry the rolling breakpoint, promoting a string if needed.
+
+    The mark goes on the SECOND-TO-LAST message: the final message is the turn
+    being asked about and changes every request, so a cache written there would
+    never be read back. Everything through the second-to-last is stable and is
+    exactly what the next turn wants to read.
+    """
+    if len(messages) < 2:
+        return None
+    m = messages[-2]
+    body = m.get("content")
+    if isinstance(body, str):
+        m["content"] = body = [{"type": "text", "text": body}]
+    if not isinstance(body, list) or not body:
+        return None
+    return body[-1] if isinstance(body[-1], dict) else None
+
+
+def mark_anthropic_cache(system: list[dict], tools: list[dict], messages: list[dict],
+                         policy: CachePolicy) -> int:
+    """Place prompt-cache breakpoints on a native Anthropic request, in place.
+
+    Marks the rolling tail first, then the last system block, then the last tool
+    definition -- the three-point pattern -- skipping any region already marked by
+    the client and never exceeding the provider's breakpoint cap. The tail is
+    marked first because it is the most valuable (a breakpoint caches everything
+    before it) and because it must remain the LAST marker in wire order: Gemini
+    honours only the final breakpoint, so ordering has to survive translation.
+
+    Args:
+        system: Native system blocks (mutated in place).
+        tools: Native tool definitions (mutated in place).
+        messages: Native messages (mutated in place; a string tail is promoted to
+            a one-element block list so a marker has somewhere to sit).
+        policy: The resolved arm's cache policy.
+
+    Returns:
+        The number of breakpoints this call added.
+    """
+    budget = policy.max_breakpoints - count_cache_marks(system, tools, messages)
+    if budget <= 0:
+        return 0
+    added = 0
+    for block in (_tail_block(messages),
+                  system[-1] if system else None,
+                  tools[-1] if tools else None):
+        if budget <= 0:
+            break
+        if block is None or block.get("cache_control"):
+            continue
+        _mark(block, policy.ttl)
+        added += 1
+        budget -= 1
+    return added

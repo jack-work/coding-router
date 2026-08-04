@@ -4,11 +4,12 @@ Instructions for any agent (or human) making changes in this repo.
 
 ## Layout
 
-This repo is the PRODUCT: the deployable router and nothing else. Two code files:
+This repo is the PRODUCT: the deployable router and nothing else. Three code files:
 
 | file | contents |
 |---|---|
-| `router_core.py` | canonical price table (`Price`/`Arm`) + artifact inference (`Router`/`Decision`) |
+| `router_core.py` | canonical price table (`Price`/`Arm`), prompt-cache capability tables (`CachePolicy`), and artifact inference (`Router`/`Decision`, incl. arm stickiness) |
+| `wire.py` | the public Chat Completions contract (request/response models) and its translation into each provider's native request, incl. cache-breakpoint placement |
 | `serve.py` | `python -m router.serve` — one command, one OpenAI-compatible endpoint |
 
 The research half that built and validates this — dataset loaders, the measurement
@@ -30,11 +31,12 @@ Two invariants of the product itself:
 
 - **1000 lines per source file, max.** Applies to `.py` files under `router/`. Does not apply to
   data/config files (`results/`, `data/`, `*.json`, `*.jsonl`, `*.npz`, `*.log`, `uv.lock`).
-- **2 code files max.** This repo went from 24 files to 8 by consolidation, then to 2 when the
-  research half moved to wmo's `packages/router-lab`. Before creating a new file here, ask
-  whether the code is product (belongs in one of the two files above) or research (belongs in
-  router-lab). If you're certain a new product file is warranted, say so explicitly and explain
-  why, rather than defaulting to a new file.
+- **3 code files max.** This repo went from 24 files to 8 by consolidation, then to 2 when the
+  research half moved to wmo's `packages/router-lab`. It became 3 when prompt caching pushed
+  `serve.py` past 1000 lines and the wire (models + provider translation) came out as its own
+  topic. Before creating a fourth, ask whether the code is product (belongs in one of the files
+  above) or research (belongs in router-lab). If you're certain a new product file is warranted,
+  say so explicitly and explain why, rather than defaulting to a new file.
 - If consolidating would push a file over 1000 lines, that's a signal to split by genuine topic
   (dataset loaders were briefly two files for exactly this reason) — not to abandon the limit.
 
@@ -87,7 +89,17 @@ Ruff (lint) and ty (type check) are dev dependencies. Before considering any cha
 ```
 uv run ruff check router/
 uv run ty check router/
+uv run pytest -q
 ```
+
+Tests live in `tests/`, outside the `router/` file-count and line-length rules. They run
+offline in under a second: no artifact, no encoder, no network. The router kinds are driven
+from synthetic artifacts written to a tmp dir, and `tests/test_live_cache.py` skips itself
+unless a provider key is present in the environment. `tests/bench_wire.py` is a standalone
+micro-benchmark (`.venv/bin/python tests/bench_wire.py`) for the per-request shaping path;
+run it on both sides of a change that touches translation or the trajectory.
+
+`nix develop` gives the same python 3.12 + uv without installing either.
 
 Ruff must pass clean. `pyproject.toml` selects `E, F, I, UP` (pycodestyle, pyflakes, import
 sort, pyupgrade) — deliberately not `B` (flake8-bugbear) or `SIM` (flake8-simplify), since
@@ -102,18 +114,21 @@ built-in "max lines per file" rule, so the 1000-line rule is enforced by this ch
 find router -name "*.py" | xargs wc -l | awk '$1 > 1000 && $2 != "total" {print; exit 1}'
 ```
 
-**ty baseline: 27 known diagnostics (all in serve.py), not bugs, don't chase them to zero
-without asking first.** Two of them are `unresolved-import` on the platform-conditional
-embedding backends (`mlx.core`, `sentence_transformers`) — only one of the two packages is
-ever installed on a given platform, so a static checker on any single machine cannot
-resolve the other. They trace to intentional dynamic-typing patterns a static checker
-can't see through — chiefly `ChatMessage.content: str | None` participating in string
-concatenation in the Chat Completions translation functions (a real but pre-existing latent
-gap: the same crash risk existed invisibly behind untyped dict access before Pydantic typing
-made it visible; fixing it means deciding what absent content should mean, a product decision).
-If this count grows for a new, different reason, treat that as a real signal worth looking at.
-Before changing this number, verify a claimed baseline shift the same way it was established
-here: diff `ty check` output against a stash of the prior state, not just eyeball the total.
+**ty baseline: 7 known diagnostics, not bugs, don't chase them to zero without asking
+first.** Two of them are `unresolved-import` on the Apple-Silicon-only embedding backend
+(`mlx.core`, `mlx_embeddings`) — those packages are never installed on Linux, so a static
+checker there cannot resolve them. The rest are SDK-overload mismatches on
+`Messages.stream`, `Responses.create` and `Completions.create`, plus one `Tensor.astype`.
+
+This number was 28 before structured content blocks were typed (`ChatMessage.content` is
+now `str | list[ContentPart] | None`, so the string-concatenation gap in the translation
+functions is closed). Note that AGENTS.md previously claimed 27 while `ty` reported 28 at
+the very commit that wrote the claim, and named `sentence_transformers` as an unresolved
+import when both unresolved imports were in fact the mlx pair — measure, don't inherit.
+If this count grows for a new, different reason, treat that as a real signal worth looking
+at. Before changing this number, verify a claimed baseline shift the same way it was
+established here: diff `ty check` output against a stash of the prior state, not just
+eyeball the total.
 
 ## Config files
 
