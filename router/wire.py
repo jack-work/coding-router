@@ -6,11 +6,13 @@ definition; `serve.py` owns the server, routing, and dispatch that use them.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -455,23 +457,48 @@ class ModelList(BaseModel):
 ANTHROPIC_IMAGE_MEDIA = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
 
+def decode_data_uri(url: str) -> tuple[str, str] | None:
+    """Split a `data:` URI into its media type and a base64 payload.
+
+    RFC 2397 makes `;base64` optional: without it the payload is
+    percent-encoded, not base64. Re-encoding that form is three lines and keeps
+    a spec-valid image working; forwarding it under a base64 label instead would
+    hand the provider bytes it cannot decode.
+
+    Args:
+        url: A `data:` URI.
+
+    Returns:
+        A (media type, base64 payload) pair, or None when there is no payload.
+    """
+    header, _, payload = url.partition(",")
+    media = header[len("data:"):].split(";")[0]
+    if not payload:
+        return None
+    if ";base64" in header:
+        return media, payload
+    return media, base64.b64encode(unquote_to_bytes(payload)).decode()
+
+
 def _image_source(url: str) -> dict[str, str] | None:
     """Build Anthropic's image `source` from a Chat Completions image URL.
 
     Args:
-        url: Either a `data:` URI carrying base64 image bytes, or a remote URL.
+        url: Either a `data:` URI carrying image bytes, or a remote URL.
 
     Returns:
-        The `source` object, or None when the URL is empty or names a media type
-        Anthropic does not accept.
+        The `source` object, or None when the URL is empty, carries no payload,
+        or names a media type Anthropic does not accept.
     """
     if not url:
         return None
     if not url.startswith("data:"):
         return {"type": "url", "url": url}
-    header, _, data = url.partition(",")
-    media = header[len("data:"):].split(";")[0]
-    if media not in ANTHROPIC_IMAGE_MEDIA or not data:
+    decoded = decode_data_uri(url)
+    if decoded is None:
+        return None
+    media, data = decoded
+    if media not in ANTHROPIC_IMAGE_MEDIA:
         logger.warning(f"image: dropping data URI with unusable media type {media!r}")
         return None
     return {"type": "base64", "media_type": media, "data": data}
@@ -509,7 +536,16 @@ def to_responses_block(part: ContentPart, marker: str | None = None) -> dict[str
     if part.type == "image_url":
         if not (part.image_url and part.image_url.url):
             return None
-        block = {"type": "input_image", "image_url": part.image_url.url}
+        url = part.image_url.url
+        if url.startswith("data:"):
+            # Normalise to the base64 form the vision guide documents; a
+            # percent-encoded payload is spec-valid inbound but not what the
+            # provider expects to receive.
+            decoded = decode_data_uri(url)
+            if decoded is None:
+                return None
+            url = f"data:{decoded[0]};base64,{decoded[1]}"
+        block = {"type": "input_image", "image_url": url}
         if part.image_url.detail:
             block["detail"] = part.image_url.detail
         return block
